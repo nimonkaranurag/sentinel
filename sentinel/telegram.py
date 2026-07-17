@@ -40,6 +40,18 @@ def credentials() -> tuple[str, str]:
     return token, chat_id
 
 
+def owner_id() -> str:
+    """
+    The user id authorized to issue commands and taps (the sender's `from.id`).
+
+    Defaults to TELEGRAM_CHAT_ID — in a 1:1 chat the sender and the chat coincide
+    — but is overridable via TELEGRAM_OWNER_ID so the bot can *deliver* into a
+    group (negative chat id) while only the owner keeps *authority* over it.
+    """
+    _, chat_id = credentials()
+    return os.environ.get("TELEGRAM_OWNER_ID") or chat_id
+
+
 def redact(text: str, token: str) -> str:
     """
     Replace the bot token with a placeholder in text bound for logs or
@@ -71,6 +83,19 @@ def _post_telegram(token: str, method: str, payload: dict[str, Any]) -> dict[str
     if resp.status_code != 200 or not body.get("ok"):
         raise NotifyError(redact(f"telegram {method} failed: {resp.status_code} {str(body)[:300]}", token))
     return body
+
+
+def post(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """
+    Public transport seam: send one Bot API request with the configured token and
+    return the parsed body.
+
+    Sibling modules (e.g. the alert engine) call this rather than reaching into
+    the underscore-private `_post_telegram`, which stays the token-taking
+    primitive tests monkeypatch.
+    """
+    token, _ = credentials()
+    return _post_telegram(token, method, payload)
 
 
 def send_message(text: str) -> None:
