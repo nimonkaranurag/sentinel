@@ -1,0 +1,102 @@
+# Sentinel configuration. Secrets do NOT go here — they live in .env (git-ignored).
+# Every tunable lives here; nothing tunable is hardcoded (CLAUDE.md conventions).
+
+db_path: ledger.db
+currency: EUR
+timezone: Europe/Dublin
+
+enable_banking:
+  base_url: https://api.enablebanking.com
+  # AIB constraints (SPEC §6): consent expires <= 180 days; ~4 unattended calls/day.
+  consent_max_days: 180
+  consent_warn_days: 14
+  api_daily_call_limit: 4
+  # First-run backfill window when no cursor exists yet (API yields ~90d anyway).
+  first_pull_days: 90
+  # Re-pull this many days behind the cursor each run. Banks backdate bookings
+  # (settlement lag, reversals, weekend batches); without overlap those rows fall
+  # outside every future window forever. INSERT OR IGNORE makes the overlap free.
+  cursor_overlap_days: 5
+  # Transient-error handling on the bank path (the allowance unit is precious:
+  # 4/day). One flaky 5xx gets a bounded retry before the run gives up.
+  max_retries: 2
+  retry_backoff_seconds: 1.5
+  # Hard cap on pagination pages per account (loop guard against a bad
+  # continuation_key). ~90 days rarely exceeds a handful of pages.
+  max_pages: 50
+  # Attended (/sync) exemption headers (PSD2 RTS Art. 36(5)). Leave psu_ip_address
+  # null to auto-detect this host's LAN IP at call time; NEVER default to a
+  # fiction like 127.0.0.1 (an aggregator that validates it will reject). Set it
+  # explicitly only if auto-detection is wrong for your network.
+  psu_ip_address: null
+  psu_user_agent: Sentinel/1.0
+  # Authorization handshake (SPEC §6, sentinel/authorize.py). POST /auth must
+  # send exactly the redirect_url registered with the Enable Banking app —
+  # nothing listens there; the helper reads the ?code= you paste from the
+  # browser's address bar after AIB's SCA.
+  redirect_url: https://localhost:8080/callback
+  # ASPSP (bank) picker: aspsp_country filters GET /aspsps; aspsp_name null =
+  # choose interactively (AIB is country IE). Set aspsp_name once you know the
+  # exact string (a --dry-run preflight prints the candidates) to skip the prompt.
+  aspsp_country: IE
+  aspsp_name: null
+  # Personal / own-data consent (SPEC §6), not a business PSU.
+  psu_type: personal
+
+csv_import:
+  # Maps the account label found in AIB CSV exports ("Posted Account" column)
+  # to the canonical account_id used by the API side, so the hash-fallback id
+  # dedupes across sources (SPEC §2). Empty = use the CSV label as-is. For
+  # cross-source dedupe to actually work this MUST map to the API account uid.
+  account_map: {}
+  # Clip CSV imports to end at the earliest API cursor date, so a 12-month
+  # backfill run after the API's ~90-day pull cannot double-count the overlap
+  # window. Rows on/after the cursor are dropped with a logged count (SPEC §2).
+  clip_to_cursor: true
+
+# telegram: bot token + chat id live in .env (SPEC §7); nothing needed here yet.
+
+categorize:
+  # Learned merchant map (grows forever, git-ignored). Path relative to repo root.
+  merchant_map_path: merchant_map.json
+  # null = bundled sentinel/rules.yaml seed rules
+  rules_path: null
+
+reports:
+  output_dir: reports
+  window_days: 90
+  # Straight-line burn-rate reference; null = trailing full-month average spend.
+  monthly_budget_cents: null
+  recurring:                # recurring-detector thresholds
+    # 2 (not 3) while this account has only ~2 months of history — a monthly sub
+    # bills at most twice in-window. The CV<10% and 28–32d interval guards still
+    # reject coincidences; raise back to 3 once the 12-month backfill lands.
+    min_occurrences: 2
+    amount_cv_max: 0.10
+    monthly_days: [28, 32]
+    weekly_days: [6, 8]
+    mad_max_days: 3
+
+budgets:
+  # The monthly discretionary pool (Groceries + FoodDelivery + Other). Set once
+  # by hand from your history / your target; safe-to-spend = what's left of this
+  # spread over the days remaining. Integer cents.
+  pool_monthly_cents: 120000   # €1,200/mo — TUNE to your target
+
+controller:
+  graduation_surplus_cents: 100000    # €1,000 surplus/mo target — one report line
+  # An unlabeled inflow this large is almost certainly a transfer, not a refund;
+  # netting it into the discretionary pool would inflate safe-to-spend by its full
+  # value until you relabel it. Above this, exclude it from the pool until labeled
+  # as Income/Transfers. Integer cents.
+  unlabeled_inflow_exclude_cents: 10000   # €100
+
+thresholds:                    # safe-to-spend traffic light (SPEC §4)
+  green_cents: 2500            # 🟢 above this
+  red_cents: 1000              # 🔴 below this
+
+telegram:
+  poll_timeout_seconds: 50     # --listen long-poll timeout (bot token/chat id live in .env)
+  # Backoff (seconds) after a transient getUpdates transport error in --listen,
+  # so one network blip doesn't kill the loop. Jittered up to +50%.
+  listen_backoff_seconds: 3

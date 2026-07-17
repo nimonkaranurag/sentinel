@@ -1,0 +1,18 @@
+# .pii-patterns.example — template for the pre-commit PII blocklist.
+#
+# Copy to .pii-patterns (GIT-IGNORED) and replace the placeholders with YOUR OWN
+# identifiers. The pre-commit hook (scripts/pre-commit) greps the staged diff
+# against these — one POSIX extended regex per line, case-insensitive. '#'
+# comments and blank lines are ignored.
+#
+# NEVER put real values in THIS file — it is committed. Real values go ONLY in
+# .pii-patterns, which .gitignore keeps out of history. The whole point of the
+# split is that the blocklist is itself sensitive: a list of your crown-jewel
+# strings must never ship in the repo.
+#
+# Suggested categories (replace each RHS with your real string):
+#   EMPLOYER_PAYROLL_STRING       # e.g. the exact text on your salary credits
+#   FAMILY_SURNAME                # names that appear on family transfers
+#   HOME_OR_FAMILY_PLACE_NAME     # a town/city that pins your location
+#   LANDLORD_OR_MANAGEMENT_CO     # rent counterparty
+#   ANY_ACCOUNT_LABEL_FRAGMENT    # a distinctive slice of an account number

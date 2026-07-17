@@ -1,0 +1,42 @@
+# ── Secrets — never commit ──────────────────────────────────────────
+.env
+
+# Owner-specific rules + bills (employer / landlord / family / local businesses)
+rules.local.yaml
+bills.local.yaml
+
+# Review / diagnosis docs quote personal figures and names
+CODE-REVIEW.md
+
+# Pre-commit PII blocklist — the list of identifiers IS itself sensitive.
+# Only .pii-patterns.example (placeholders) is committed. See scripts/pre-commit.
+.pii-patterns
+
+# ── Real financial data — must never reach git ──────────────────────
+# (matched at any depth: `data/` also covers sentinel/data/, etc.)
+data/
+backups/
+reports/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Learned merchant map — contains real merchant history
+merchant_map.json
+
+# ── Python ───────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+.coverage
+htmlcov/
+
+# ── Runtime output ───────────────────────────────────────────────────
+logs/
