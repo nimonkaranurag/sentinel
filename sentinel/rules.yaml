@@ -1,0 +1,33 @@
+# Seed regex rules — step 3 of the categorizer cascade (SPEC §3).
+# Python regexes, matched with re.search against the NORMALIZED merchant name
+# (already uppercased). First match wins. Categories must be in the fixed
+# taxonomy (validated at load). Learned mappings live in merchant_map.json,
+# not here — this file is only the seed.
+rules:
+  - pattern: "\\b(TESCO|LIDL|ALDI|DUNNES|SUPERVALU|CENTRA|SPAR|MARKS & SPENCER)\\b"
+    category: Groceries
+  # Food delivery → FoodDelivery. MUST precede the generic UBER->Transport rule
+  # below (first match wins), so "UBER * EATS" is food, not a ride.
+  - pattern: "UBER ?\\*? ?EATS|UBEREATS|DELIVEROO|JUST ?EAT"
+    category: FoodDelivery
+  - pattern: "\\bUBR\\* ?PENDING|PENDING\\.UBER"   # Uber RIDES settle under this auth string (owner-confirmed); Eats posts separately as "UBER * EATS"
+    category: Transport
+  - pattern: "\\b(LEAP|FREE ?NOW|IRISH RAIL|IARNROD EIREANN|LUAS|DUBLIN BUS|BUS EIREANN|UBER|BOLT)\\b"
+    category: Transport
+  - pattern: "\\bANTHROPIC\\b|CLAUDE"
+    category: Tools
+  - pattern: "\\bBJJ\\b|JIU ?JITSU|GRACIE BARRA|FLYEFIT|\\bGYM\\b"
+    category: Health/Fitness
+  - pattern: "NETFLIX|SPOTIFY|DISNEY|YOUTUBE|APPLE\\.COM/BILL|ICLOUD|AMAZON PRIME|AUDIBLE"
+    category: Subscriptions
+  - pattern: "\\bATM\\b|CASH WITHDRAWAL|CASH LODGE"
+    category: Cash
+  - pattern: "\\bSALARY\\b|PAYROLL|\\bPAYE\\b"
+    category: Income
+  - pattern: "^(TO|FROM) A/?C\\b|FAMILY TRANSFER"
+    category: Transfers
+  # Owner-specific patterns (employer, landlord, family, local businesses) live
+  # in the git-ignored rules.local.yaml, merged AHEAD of these at load so they
+  # match first. Never put personal names in this committed file.
+  - pattern: "\\bFEES?\\b|BANK CHARGES|GOVT STAMP DUTY"
+    category: Fees
