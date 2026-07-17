@@ -289,7 +289,8 @@ def run(conn, cfg: dict[str, Any], dry_run: bool = False, as_of: date | None = N
     return _log_cascade(conn, cfg, as_of, stats)
 
 
-def relink(conn, cfg: dict[str, Any], as_of: date | None = None) -> dict[str, Any]:
+def relink(conn, cfg: dict[str, Any], as_of: date | None = None,
+           dry_run: bool = False) -> dict[str, Any]:
     """
     Clear every merchant link and row and rebuild from scratch in a single
     transaction. Run after a normalizer or rule change.
@@ -297,16 +298,24 @@ def relink(conn, cfg: dict[str, Any], as_of: date | None = None) -> dict[str, An
     The clear and rebuild share one transaction, so a crash mid-rebuild (for
     example on a malformed rules.local.yaml) leaves the existing labels intact.
     Owner 'manual' labels survive because _apply_cascade re-applies them from the
-    merchant map with their original provenance.
+    merchant map with their original provenance. Under dry_run the whole
+    clear-and-rebuild is rolled back, so `--relink --dry-run` is a real preview of
+    what the rebuild would produce rather than a silently downgraded plain run.
     """
     as_of = as_of or datetime.now(db.TZ).date()
     cleared = conn.execute("SELECT COUNT(*) FROM merchants").fetchone()[0]
     conn.execute("UPDATE transactions SET merchant_id = NULL")
     conn.execute("DELETE FROM merchants")
     stats = _apply_cascade(conn, cfg)
-    conn.commit()
-    log.info("relink: cleared %d merchant row(s), rebuilt %d link(s)", cleared, stats["linked"])
-    return _log_cascade(conn, cfg, as_of, stats)
+    result = _log_cascade(conn, cfg, as_of, stats)  # read the rebuilt state before commit/rollback
+    if dry_run:
+        conn.rollback()
+        log.info("dry-run relink: would clear %d merchant row(s) and rebuild %d link(s) — rolled back",
+                 cleared, stats["linked"])
+    else:
+        conn.commit()
+        log.info("relink: cleared %d merchant row(s), rebuilt %d link(s)", cleared, stats["linked"])
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -329,8 +338,8 @@ def main(argv: list[str] | None = None) -> int:
     conn = db.connect(args.db or cfg.get("db_path", "ledger.db"))
     try:
         db.init_db(conn)
-        if args.relink and not args.dry_run:
-            relink(conn, cfg)
+        if args.relink:
+            relink(conn, cfg, dry_run=args.dry_run)
         else:
             run(conn, cfg, dry_run=args.dry_run)
         return 0
