@@ -1,0 +1,10 @@
+[Unit]
+Description=Sentinel Sunday weekly digest (18:00)
+
+[Timer]
+OnCalendar=Sun *-*-* 18:00:00
+Persistent=true
+Unit=sentinel-cron@digest.service
+
+[Install]
+WantedBy=timers.target

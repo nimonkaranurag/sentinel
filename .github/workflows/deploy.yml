@@ -1,0 +1,62 @@
+name: Deploy
+
+# Continuous deployment to the always-on host. Runs only after the CI workflow
+# succeeds on a push to main, then pushes the new code to the server and restarts
+# the listener. The scheduled jobs (systemd timers) pick up the new code on their
+# next firing. See docs/DEPLOY.md for host setup and the required secrets.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Never run two deploys at once; do not cancel an in-flight deploy.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # Only on a successful CI run that was itself triggered by a push.
+    if: >-
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Deploy over SSH (pull, sync, migrate, restart)
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          # Until a host is configured, skip cleanly (green) instead of failing
+          # every push. Set the DEPLOY_* secrets to turn CD on (see docs/DEPLOY.md).
+          if [ -z "$DEPLOY_HOST" ]; then
+            echo "::notice::DEPLOY_HOST not set — skipping deploy. Configure DEPLOY_* secrets to enable CD."
+            exit 0
+          fi
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          if [ -n "$DEPLOY_KNOWN_HOSTS" ]; then
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+            ssh_opts="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
+          else
+            # No pinned host key provided: trust on first use. Set DEPLOY_KNOWN_HOSTS
+            # (ssh-keyscan output) to verify the host key on every deploy instead.
+            ssh_opts="-o StrictHostKeyChecking=accept-new"
+          fi
+          ssh $ssh_opts -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" 'bash -euo pipefail -s' <<'REMOTE'
+          cd /opt/sentinel
+          git fetch --prune origin
+          git reset --hard origin/main            # ignored files (.env, ledger.db, *.local.yaml) are preserved
+          uv sync                                 # rebuild .venv from the lockfile
+          uv run python -m sentinel.db --init     # apply pending migrations (idempotent)
+          sudo systemctl restart sentinel-listen.service
+          echo "deployed $(git rev-parse --short HEAD)"
+          REMOTE

@@ -1,0 +1,16 @@
+[Unit]
+Description=Sentinel nightly SQLite backup (online .backup, never a raw copy)
+
+[Service]
+Type=oneshot
+User=sentinel
+WorkingDirectory=/opt/sentinel
+# `.backup` is WAL-safe and reclaims space without VACUUM. VACUUM is unsafe here:
+# it renumbers the implicit rowids the alert watermark keys on, which can strand a
+# freshly-inserted row below the watermark (see sentinel/state_keys.py).
+ExecStart=/bin/sh -c 'mkdir -p /opt/sentinel/backups && sqlite3 /opt/sentinel/ledger.db ".backup /opt/sentinel/backups/ledger-$(date +%%F).db"'
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/sentinel
