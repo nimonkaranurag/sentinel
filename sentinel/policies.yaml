@@ -1,0 +1,13 @@
+# Spending-policy alerts — schema-checked at load (sentinel/policies.py).
+# Each policy needs: name, cap_monthly_cents, and EXACTLY ONE matcher —
+#   bucket:    one of Income|Transfers|Fixed|Groceries|FoodDelivery|Other
+#   sub_label: one of the fine categories (e.g. Coffee/Snacks, Dining)
+#   pattern:   a Python regex matched against the merchant name
+# An unknown key or a missing matcher is a startup crash, never a silent default.
+policies:
+  - name: food-delivery
+    bucket: FoodDelivery
+    cap_monthly_cents: 15000     # €150/mo — the watched leak (Deliveroo/Uber Eats)
+  - name: groceries
+    bucket: Groceries
+    cap_monthly_cents: 60000     # €600/mo
