@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import logging
 import re
 import sqlite3
@@ -40,6 +41,11 @@ TZ = ZoneInfo("Europe/Dublin")
 SCHEMA_VERSION = 1
 
 VALID_SOURCES = ("api", "csv")
+
+# How long a writer waits on a locked WAL DB before raising OperationalError.
+# The four daily polls, /sync, and the callback loop can briefly contend for the
+# write lock; a bounded wait lets the loser retry instead of crashing outright.
+BUSY_TIMEOUT_MS = 5000
 
 # Amount grammar: plain decimal or thousands-grouped, max 2 decimal places.
 # Anything else (decimal commas, >2 decimals, stray text) raises rather than
@@ -71,6 +77,7 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")  # wait, don't crash, on lock contention
     return conn
 
 
@@ -287,6 +294,32 @@ def insert_transactions(
     before = conn.total_changes
     conn.executemany(_INSERT_TXN_SQL, prepared)
     return conn.total_changes - before, len(prepared)
+
+
+# ── Quarantine (rows that cannot enter the ledger) ────────────────────────
+
+
+def quarantine_row(conn: sqlite3.Connection, source: str, reason: str,
+                   raw: Mapping[str, Any], account_id: str | None = None) -> None:
+    """
+    Record a row that could not be booked (non-EUR, sign-ambiguous, malformed) so
+    it is retained and countable instead of vanishing into a log line.
+
+    Idempotent: the fingerprint over source + raw payload makes the same row,
+    re-fetched inside the cursor overlap window every poll, quarantine once rather
+    than accumulating a duplicate every run. Does not commit.
+    """
+    payload = json.dumps(raw, sort_keys=True, default=str)
+    fingerprint = hashlib.sha256(f"{source}|{payload}".encode()).hexdigest()
+    conn.execute(
+        "INSERT OR IGNORE INTO quarantine (source, reason, raw, account_id, seen_at, fingerprint) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (source, reason, payload, account_id, now_iso(), fingerprint),
+    )
+
+
+def quarantine_count(conn: sqlite3.Connection) -> int:
+    return conn.execute("SELECT COUNT(*) FROM quarantine").fetchone()[0]
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────
