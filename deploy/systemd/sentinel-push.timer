@@ -1,0 +1,10 @@
+[Unit]
+Description=Sentinel daily safe-to-spend push (08:00)
+
+[Timer]
+OnCalendar=*-*-* 08:00:00
+Persistent=true
+Unit=sentinel-cron@push.service
+
+[Install]
+WantedBy=timers.target

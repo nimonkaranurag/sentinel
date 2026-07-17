@@ -1,0 +1,20 @@
+[Unit]
+# Templated one-shot for the scheduled pushes. The instance name is the notify
+# flag: sentinel-cron@poll -> `--poll`, @push -> `--push`, @plan, @digest.
+# Each flag runs exactly its own job (no getUpdates), so a timer firing never
+# collides with the always-on sentinel-listen.service.
+Description=Sentinel scheduled job (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=sentinel
+WorkingDirectory=/opt/sentinel
+EnvironmentFile=/opt/sentinel/.env
+ExecStart=/opt/sentinel/.venv/bin/python -m sentinel.notify --%i
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/sentinel

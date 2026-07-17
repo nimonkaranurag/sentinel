@@ -1,38 +1,84 @@
-name: ci
+name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+    branches: [main]
 
-# Least privilege: the default GITHUB_TOKEN is write-scoped; this job only reads.
+# Least privilege: every job only reads the repository.
 permissions:
   contents: read
 
+# One in-flight run per ref; a newer push cancels the older run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  check:
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     steps:
-      # Third-party actions are pinned to commit SHAs (not moving tags) — a repo
-      # that leads with gitleaks shouldn't trust a tag it doesn't control.
+      # Third-party actions are pinned to commit SHAs (not moving tags).
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-        with:
-          fetch-depth: 0          # gitleaks scans full history
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
       - run: uv sync --dev
-      - name: lint (ruff)
+      - name: Ruff
         run: uv run ruff check .
-      - name: types (mypy)
-        run: uv run mypy sentinel
-      - name: tests + coverage (gated at 80%)
+      - name: Lockfile is in sync with pyproject
+        # The committed uv.lock must track pyproject; fail if deps changed without
+        # re-locking, since the deploy host is provisioned from the lockfile.
+        run: uv lock --check
+
+  typecheck:
+    name: Type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
+      - run: uv sync --dev
+      - run: uv run mypy sentinel
+
+  test:
+    name: Test (${{ matrix.os }} · py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.12", "3.13"]
+        include:
+          # POSIX smoke on the primary interpreter; the bot is deployed on Linux.
+          - os: macos-latest
+            python-version: "3.12"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --dev
+      - name: Tests + coverage (gated at 80%)
         run: uv run pytest -q --cov=sentinel --cov-report=term-missing --cov-fail-under=80
+
+  security:
+    name: Security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          fetch-depth: 0          # gitleaks scans the full history
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
+      - run: uv sync --dev
       # gitleaks-action scans the push range `<base>^..<head>`, but a repo's root
       # commit has no `<base>^`, so the initial push fails with "unknown revision".
-      # Run the pinned binary directly instead: `detect` scans the full history
-      # from the root, so it is correct on the first push and every push after.
-      - name: secret scan (gitleaks, full history)
+      # The pinned binary's `detect` scans full history and is robust on every push.
+      - name: Secret scan (gitleaks)
         env:
           GITLEAKS_VERSION: "8.24.3"
         run: |
           curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
             | tar -xz -C /tmp gitleaks
           /tmp/gitleaks detect --source . --redact --exit-code 2 -v
+      - name: Dependency audit (pip-audit)
+        run: uv run --with pip-audit pip-audit

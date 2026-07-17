@@ -1,0 +1,27 @@
+[Unit]
+Description=Sentinel Telegram listener (commands + inline callbacks)
+Documentation=https://github.com/nimonkaranurag/sentinel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sentinel
+WorkingDirectory=/opt/sentinel
+EnvironmentFile=/opt/sentinel/.env
+# Long-poll getUpdates so /recat, /sync, /today, and inline buttons work in real
+# time. This is the ONE getUpdates reader; the timers below use flags that never
+# call getUpdates, so they can never contend with it.
+ExecStart=/opt/sentinel/.venv/bin/python -m sentinel.notify --listen
+Restart=always
+RestartSec=5
+
+# Hardening: all app writes (ledger.db, merchant_map.json, logs/, backups/) are
+# confined to the working directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/sentinel
+
+[Install]
+WantedBy=multi-user.target

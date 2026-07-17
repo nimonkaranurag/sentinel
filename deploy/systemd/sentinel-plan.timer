@@ -1,0 +1,10 @@
+[Unit]
+Description=Sentinel Monday weekly-plan push (08:05)
+
+[Timer]
+OnCalendar=Mon *-*-* 08:05:00
+Persistent=true
+Unit=sentinel-cron@plan.service
+
+[Install]
+WantedBy=timers.target
