@@ -1,0 +1,42 @@
+#!/bin/sh
+# Sentinel pre-commit — keep secrets & PII out of git history.
+#
+# This hook is PORTABLE and safe to publish: it contains NO personal strings.
+# Its logic is public; its payload (the list of your own identifiers) is not —
+# that lives in a GIT-IGNORED pattern file, .pii-patterns (see
+# .pii-patterns.example). Install into .git/hooks with:  scripts/install-hooks.sh
+#
+# Checks, in order: gitleaks (if installed) → generic secret shapes → owner PII.
+
+root=$(git rev-parse --show-toplevel)
+staged=$(git diff --cached -U0)
+fail=0
+
+# 1) gitleaks, when available (a real clone should install it; brew install gitleaks).
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks protect --staged --redact --no-banner || fail=1
+fi
+
+# 2) Generic secret SHAPES — no personal data, so these are safe to commit.
+if printf '%s' "$staged" | grep -qEi \
+  'sk-[A-Za-z0-9_-]{20}|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|xox[baprs]-[A-Za-z0-9-]{10}|AKIA[0-9A-Z]{16}'; then
+  echo "pre-commit: a secret-shaped string is in the staged diff — commit blocked." >&2
+  fail=1
+fi
+
+# 3) Owner PII — patterns come from the git-ignored .pii-patterns (one extended
+#    regex per line; '#' comments and blank lines ignored). Absent file = the
+#    grep is skipped, with a nudge, rather than silently passing.
+patterns_file="$root/.pii-patterns"
+if [ -f "$patterns_file" ]; then
+  alt=$(grep -vE '^[[:space:]]*(#|$)' "$patterns_file" | paste -sd '|' -)
+  if [ -n "$alt" ] && printf '%s' "$staged" | grep -qEi "$alt"; then
+    echo "pre-commit: a personal identifier (.pii-patterns) is in the staged diff — commit blocked." >&2
+    fail=1
+  fi
+else
+  echo "pre-commit: no .pii-patterns file — PII grep skipped." >&2
+  echo "            cp .pii-patterns.example .pii-patterns and fill in your own strings." >&2
+fi
+
+exit $fail
