@@ -9,12 +9,13 @@ from sentinel import authorize, controller, db, ingest, notify, telegram
 
 
 class _Resp:
-    def __init__(self, body, ok=True):
+    def __init__(self, body, ok=True, status=None):
         self._body, self.ok = body, ok
+        self.status_code = status if status is not None else (200 if ok else 500)
 
     def raise_for_status(self):
-        if not self.ok:
-            raise requests.HTTPError("500 server error")
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"{self.status_code} error", response=self)
 
     def json(self):
         return self._body
@@ -45,6 +46,37 @@ def test_client_gives_up_after_max_retries(monkeypatch, no_jwt):
     client = ingest.EnableBankingClient("app", "/k", max_retries=1, retry_backoff=0.0)
     with pytest.raises(requests.HTTPError):
         list(client.iter_transactions("uid", "2026-01-01"))
+
+
+def test_client_fails_fast_on_4xx_without_retrying(monkeypatch, no_jwt):
+    """A 403 (expired/revoked consent) is deterministic: retrying it just burns
+    the precious daily allowance, so it must raise on the FIRST attempt."""
+    calls = {"n": 0}
+
+    def fake_get(url, **kw):
+        calls["n"] += 1
+        return _Resp({}, ok=False, status=403)
+
+    monkeypatch.setattr(ingest.requests, "get", fake_get)
+    client = ingest.EnableBankingClient("app", "/k", max_retries=2, retry_backoff=0.0)
+    with pytest.raises(requests.HTTPError):
+        list(client.iter_transactions("uid", "2026-01-01"))
+    assert calls["n"] == 1, "4xx must not be retried"
+
+
+def test_warn_on_auth_error_notifies_owner_once_per_day(tmp_path, monkeypatch):
+    conn = db.connect(tmp_path / "ledger.db")
+    db.init_db(conn)
+    sent = []
+    monkeypatch.setattr(ingest.telegram, "send_message", lambda msg: sent.append(msg))
+    exc = requests.HTTPError("403", response=_Resp({}, ok=False, status=403))
+    ingest.warn_on_auth_error(conn, exc)
+    ingest.warn_on_auth_error(conn, exc)  # same day → no second nag
+    assert len(sent) == 1 and "consent expired" in sent[0].lower()
+    # a non-auth 5xx is not a consent problem → silent
+    ingest.warn_on_auth_error(conn, requests.HTTPError("500", response=_Resp({}, ok=False, status=500)))
+    assert len(sent) == 1
+    conn.close()
 
 
 def test_client_follows_pagination(monkeypatch, no_jwt):
@@ -107,7 +139,7 @@ def fake_tg(monkeypatch):
 def test_db_cli_init(tmp_path):
     assert db.main(["--init", "--config", str(_cfg(tmp_path))]) == 0
     conn = db.connect(tmp_path / "ledger.db")
-    assert db.schema_version(conn) == 5
+    assert db.schema_version(conn) == 6
     conn.close()
 
 
