@@ -4,16 +4,21 @@ DB ?= ledger.db
 
 .PHONY: init hooks backfill categorize relink report poll notify plan digest backup test
 
-# Cron (Europe/Dublin). `poll` is the one ingest path — it also categorizes and
-# fires policy alerts, so there is no alert-less ingest target to run by mistake.
-#   45 7,12,17,21 * * *  make poll     # ingest + categorize + policy alerts
-#   0  8 * * *           make notify   # daily safe-to-spend + answer commands
+# Cron (Europe/Dublin) — see deploy/crontab.txt (simple/local) or deploy/systemd/
+# (production always-on + auto-deploy) for the real jobs.
+# `poll` is the one ingest path — it also categorizes and fires policy + bill
+# alerts, so there is no alert-less ingest target to run by mistake. None of these
+# call getUpdates: answering commands is the always-on `--listen` reader (a
+# @reboot cron line, or sentinel-listen.service), the single getUpdates reader.
+#   45 7,12,17,21 * * *  make poll     # ingest + categorize + policy/bill alerts
+#   0  8 * * *           make notify   # daily safe-to-spend PUSH only (no getUpdates)
 #   0  8 * * 1           make plan     # Monday weekly plan
 #   0 18 * * 0           make digest   # Sunday weekly report
-#   30 2 * * *           make backup   # nightly sqlite .backup
+#   30 2 * * *           make backup   # nightly sqlite .backup — never VACUUM (renumbers
+#                                      # rowids and can skip the alert watermark; see state_keys.py)
 
 init:
-	mkdir -p data/backfill reports backups
+	mkdir -p data/backfill reports backups logs
 	$(PY) -m sentinel.db --init
 
 hooks:  ## install the pre-commit hook (secrets + PII scan)
@@ -34,7 +39,7 @@ report:
 poll:  ## ingest + categorize + policy alerts (the cron path; consumes 1 API unit)
 	$(PY) -m sentinel.notify --poll
 
-notify:  ## daily safe-to-spend push + answer pending commands
+notify:  ## daily safe-to-spend push (bare = --push only; command answering is --listen)
 	$(PY) -m sentinel.notify
 
 plan:  ## Monday weekly plan push (idempotent per ISO week)

@@ -41,10 +41,10 @@ def send_policy_alert(conn, alert: dict[str, Any]) -> int | None:
     Send one alert with the inline keyboard and record it in `events` for the
     audit trail and in-place edits.
     """
-    token, chat_id = telegram.credentials()
-    body = telegram._post_telegram(token, "sendMessage",
-                                   {"chat_id": chat_id, "text": alert["text"],
-                                    "reply_markup": render.alert_keyboard(alert["txn_id"])})
+    _, chat_id = telegram.credentials()
+    body = telegram.post("sendMessage",
+                         {"chat_id": chat_id, "text": alert["text"],
+                          "reply_markup": render.alert_keyboard(alert["txn_id"])})
     message_id = (body.get("result") or {}).get("message_id")
     conn.execute("INSERT INTO events (kind, txn_id, message_id, status, detail, created_at) "
                  "VALUES ('policy_alert', ?, ?, 'sent', ?, ?)",
@@ -62,7 +62,15 @@ def poll_alerts(conn, cfg: dict[str, Any], as_of: date, dry_run: bool = False) -
     so a replay after a crash re-sends only what never went out. The watermark
     advances and commits only after the batch is processed.
     """
-    watermark = int(db.get_state(conn, state_keys.ALERTS_CHECKED_THROUGH, "0") or "0")
+    stored = db.get_state(conn, state_keys.ALERTS_CHECKED_THROUGH)
+    if stored is None and dry_run:
+        # A first-ever poll under --dry-run has no baseline yet. The live poll
+        # sets the baseline to the current tip before ingesting, so evaluating
+        # from 0 here would "alert" the entire backfill the live run will never
+        # send — a dry-run must mirror the live run, not misrepresent it.
+        watermark = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM transactions").fetchone()[0]
+    else:
+        watermark = int(stored or "0")
     rows = conn.execute(
         "SELECT rowid AS rid, id FROM transactions WHERE rowid > ? ORDER BY rowid",
         (watermark,),

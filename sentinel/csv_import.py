@@ -35,12 +35,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import db
+from . import db, state_keys
 
 log = logging.getLogger(__name__)
 
@@ -168,27 +169,51 @@ def row_to_transaction(
 
 def compute_clip_before(conn) -> str | None:
     """
-    Return the earliest API booking date, before which CSV rows may be imported.
+    Return the date at or after which CSV rows are already covered by the API and
+    so must be clipped to avoid double-counting.
 
-    CSV rows on or after that date are covered by the API and would double-count,
-    so they are clipped. Returns None when no API rows exist yet, allowing a full
-    import.
+    This is a fact about *coverage*, so it is anchored to the recorded API
+    coverage start (the first pull's date_from, api_coverage_start) rather than to
+    MIN(booking_date): a single backdated reversal booked months inside the window
+    would otherwise drag MIN back and clip — silently — almost the entire 12-month
+    backfill. Normally MIN(api) sits at or after the coverage start and is the
+    tighter, correct boundary; only when it precedes the coverage start (the
+    backdated-outlier case) do we fall back to the recorded start. Returns None
+    when no API rows exist yet, allowing a full import.
     """
     row = conn.execute(
         "SELECT MIN(booking_date) AS lo FROM transactions WHERE source = 'api'"
     ).fetchone()
-    return row["lo"] if row and row["lo"] else None
+    min_api = row["lo"] if row and row["lo"] else None
+    if min_api is None:
+        return None
+    coverage_start = db.get_state(conn, state_keys.API_COVERAGE_START)
+    if coverage_start and min_api < coverage_start[:10]:
+        log.warning("earliest API booking %s precedes coverage start %s (backdated row?) — "
+                    "clipping at the coverage start so one old row can't amputate the backfill",
+                    min_api, coverage_start[:10])
+        return coverage_start[:10]
+    return min_api
 
 
-def _open_csv(path: Path):
+def _read_csv_rows(path: Path) -> csv.DictReader:
     """
-    Open the CSV as utf-8-sig, falling back to cp1252 (AIB occasionally emits
-    Windows-1252).
+    Decode the whole file up front (utf-8-sig, then cp1252) and hand back a reader.
+
+    AIB occasionally emits Windows-1252 — an accented merchant name arrives as a
+    lone 0xE9, say. Python's open() decodes lazily *during iteration*, so wrapping
+    open() in a try/except never catches the decode; the bytes must be decoded
+    before the CSV reader ever sees them.
     """
+    data = path.read_bytes()
     try:
-        return open(path, newline="", encoding="utf-8-sig")
-    except UnicodeDecodeError:  # pragma: no cover - opening rarely decodes eagerly
-        return open(path, newline="", encoding="cp1252")
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            text = data.decode("cp1252")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"{path}: could not decode as utf-8 or cp1252: {exc}") from None
+    return csv.DictReader(io.StringIO(text))
 
 
 def import_file(conn, path: str | Path, account_map: dict[str, str],
@@ -204,28 +229,24 @@ def import_file(conn, path: str | Path, account_map: dict[str, str],
     path = Path(path)
     rows: list[dict[str, Any]] = []
     skipped = quarantined = clipped = 0
-    try:
-        fh = _open_csv(path)
-    except UnicodeDecodeError as exc:
-        raise ValueError(f"{path}: could not decode as utf-8 or cp1252: {exc}") from None
-    with fh:
-        reader = csv.DictReader(fh)
-        if not reader.fieldnames:
-            raise ValueError(f"{path}: empty file, no CSV header")
-        columns = _resolve_header(list(reader.fieldnames))
-        for line_no, row in enumerate(reader, 2):  # line 1 is the header
-            try:
-                mapped = row_to_transaction(row, columns, account_map, currency)
-            except Exception as exc:  # one poisoned row must not abort the backfill
-                quarantined += 1
-                log.warning("%s line %d: quarantined malformed row: %s", path.name, line_no, exc)
-                continue
-            if mapped is None:
-                skipped += 1
-            elif clip_before is not None and mapped["booking_date"] >= clip_before:
-                clipped += 1
-            else:
-                rows.append(mapped)
+    reader = _read_csv_rows(path)
+    if not reader.fieldnames:
+        raise ValueError(f"{path}: empty file, no CSV header")
+    columns = _resolve_header(list(reader.fieldnames))
+    for line_no, row in enumerate(reader, 2):  # line 1 is the header
+        try:
+            mapped = row_to_transaction(row, columns, account_map, currency)
+        except Exception as exc:  # one poisoned row must not abort the backfill
+            quarantined += 1
+            db.quarantine_row(conn, "csv", str(exc), row, None)
+            log.warning("%s line %d: quarantined malformed row: %s", path.name, line_no, exc)
+            continue
+        if mapped is None:
+            skipped += 1
+        elif clip_before is not None and mapped["booking_date"] >= clip_before:
+            clipped += 1
+        else:
+            rows.append(mapped)
     inserted, submitted = db.insert_transactions(conn, rows)
     log.info("%s: %d rows, %d new, %d duplicate, %d skipped, %d quarantined, %d clipped(>=API %s)",
              path.name, submitted, inserted, submitted - inserted, skipped, quarantined,

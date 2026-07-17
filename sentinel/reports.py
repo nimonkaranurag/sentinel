@@ -413,10 +413,10 @@ def _md_table(headers: list[str], rows: list[list[str]]) -> str:
     return "\n".join(lines)
 
 
-def render_subscriptions_md(recurring, as_of: date) -> str:
+def render_subscriptions_md(recurring, as_of: date, min_n: int = 3) -> str:
     lines = [f"# Recurring spend — detected {as_of.isoformat()}", ""]
     if not recurring:
-        lines.append("No recurring merchants detected yet (need ≥3 regular occurrences).")
+        lines.append(f"No recurring merchants detected yet (need ≥{min_n} regular occurrences).")
         return "\n".join(lines) + "\n"
     total_annual = sum(s["annualized_cents"] for s in recurring)
     lines.append(f"**{len(recurring)} recurring merchant(s) · "
@@ -610,9 +610,10 @@ def run_reports(conn, cfg: dict[str, Any], as_of: date | None = None,
             chart_weekday(outdir, data["weekday"]),
             chart_burn_rate(outdir, data["daily"], budget),
         ]
+        min_n = int((rcfg.get("recurring") or {}).get("min_occurrences", 3))
         (outdir / "EXPENSE_REPORT.md").write_text(render_report_md(data), encoding="utf-8")
         (outdir / "subscriptions.md").write_text(
-            render_subscriptions_md(data["recurring"], as_of), encoding="utf-8")
+            render_subscriptions_md(data["recurring"], as_of, min_n), encoding="utf-8")
         data["files"] = ["EXPENSE_REPORT.md", "subscriptions.md"] + [c for c in charts if c]
         log.info("wrote %s to %s/", ", ".join(data["files"]), outdir)
 

@@ -10,7 +10,8 @@ double-send.
 CLI: python -m sentinel.notify [--push] [--updates] [--listen] [--digest]
                                [--poll] [--plan] [--as-of DATE] [--dry-run]
                                [--db] [--config]
-     (no flags = --push --updates, one pass)
+     (no flags = --push only; command answering is --updates one-shot or the
+      always-on --listen, the single getUpdates reader — never a cron)
 Exit codes: 0 ok · 2 telegram not configured
 """
 
@@ -24,7 +25,7 @@ from datetime import date, datetime, timedelta
 
 from dotenv import load_dotenv
 
-from . import alerts, categorize, commands, db, ingest, render, state_keys, telegram
+from . import alerts, bills, categorize, commands, db, ingest, render, state_keys, telegram
 
 log = logging.getLogger(__name__)
 
@@ -61,20 +62,24 @@ def push_daily(conn, cfg: dict, as_of: date | None = None,
 
 def run_poll(conn, cfg: dict, as_of: date | None = None, dry_run: bool = False) -> int:
     """
-    Run one cron poll: ingest new rows (unattended, consuming the daily
-    allowance), categorize, then fire policy alerts on what just booked.
+    Run one cron poll: warn on consent expiry, ingest new rows (unattended,
+    consuming the daily allowance), categorize, then fire policy and bill alerts
+    on what just booked. Returns the number of alerts sent.
 
     Fully read-only on --dry-run: no ingest, categorization is rolled back,
     nothing is sent, and the alert watermark does not advance.
     """
     as_of = as_of or datetime.now(db.TZ).date()
+    eb = cfg.get("enable_banking") or {}
+    # The consent-expiry nag runs every poll (idempotent per day) so the product
+    # cannot go dark at day ≤180 with no warning. Read-only under --dry-run.
+    ingest.warn_if_consent_expiring(conn, int(eb.get("consent_warn_days", 14)), dry_run)
     if not dry_run:
         alerts.ensure_baseline(conn)  # before ingest, so this poll's rows still alert
         app_id = os.environ.get("ENABLE_BANKING_APP_ID")
         key_path = os.environ.get("ENABLE_BANKING_PRIVATE_KEY_PATH")
         uids_raw = db.get_state(conn, state_keys.EB_ACCOUNT_UIDS)
         if app_id and key_path and uids_raw:
-            eb = cfg.get("enable_banking") or {}
             if ingest.check_and_consume_allowance(conn, int(eb.get("api_daily_call_limit", 4))):
                 try:
                     client = ingest.build_client(cfg, app_id, key_path)
@@ -84,8 +89,11 @@ def run_poll(conn, cfg: dict, as_of: date | None = None, dry_run: bool = False) 
                                       currency=cfg.get("currency", "EUR"))
                 except Exception as exc:
                     log.warning("poll ingest failed: %s", exc)
+                    ingest.warn_on_auth_error(conn, exc)  # a 401/403 tells the owner to re-auth
     categorize.run(conn, cfg, dry_run=dry_run, as_of=as_of)  # forward dry_run
-    return alerts.poll_alerts(conn, cfg, as_of, dry_run=dry_run)
+    fired = alerts.poll_alerts(conn, cfg, as_of, dry_run=dry_run)
+    fired += bills.send_alerts(conn, cfg, as_of, dry_run=dry_run)  # late/drift bills fire each poll
+    return fired
 
 
 # ── Weekly plan (Monday) ────────────────────────────────────────────────────
@@ -158,8 +166,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         db.init_db(conn)
         as_of = date.fromisoformat(args.as_of) if args.as_of else None
+        # Bare `notify` is push-only. Answering commands calls getUpdates, and
+        # Telegram allows a single getUpdates reader — that is the always-on
+        # --listen surface, so a cron must never do it implicitly (would 409 with
+        # the listener). Ask for --updates/--listen explicitly.
         if not any((args.push, args.updates, args.listen, args.digest, args.poll, args.plan)):
-            args.push = args.updates = True
+            args.push = True
         if args.poll:
             run_poll(conn, cfg, as_of=as_of, dry_run=args.dry_run)
         if args.push:

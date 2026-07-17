@@ -79,10 +79,12 @@ Fine **sub-labels** (Dining, Coffee/Snacks, Subscriptions, …) roll up via
    by append-only `events` + `processed_callbacks` tables: at-least-once delivery
    with idempotent effects (a retried tap changes nothing twice).
 3. **Bills** (`bills.py`, git-ignored `bills.local.yaml`). Registry of expected
-   recurring charges; alerts **late** (past the due date + grace, measured
-   against a real date that rolls across month boundaries so end-of-month bills
-   are detectable = bounced debit) and **drift** (outside tolerance = price
-   hike); rendered in the weekly report.
+   recurring charges. Each poll (and `/sync`) fires **late** (past the due date +
+   grace, measured against a real date that rolls across month boundaries so
+   end-of-month bills are detectable = bounced debit) and **drift** (outside
+   tolerance = price hike), each guarded by a per-cycle `state` key so one late
+   bill sends one message per cycle, not one per poll; also rendered in the weekly
+   report.
 4. **Safe-to-spend** (`controller.py`). `safe_today = max(0, (pool_monthly_cents
    − MTD discretionary) ÷ days_left)`. The pool is a config number; underspend
    rolls forward, overspend drags it down. Small refunds net against spend; a
@@ -101,24 +103,33 @@ Commands (owner chat only): `/today /status /cat /sync /recat /date`.
 ## 5. Data model
 
 `transactions` · `merchants` · `state` (cursors, consent expiry, per-day API
-counter, the alert watermark, idempotency keys — key formats in `state_keys.py`)
-· `events` + `processed_callbacks` (relabel loop). No `budgets`, `llm_calls`,
-envelope, or graduation tables (v1 `schema.sql` creates `budgets`; migration 005
-drops it and removes the dead `'llm'` provenance value).
+counter, the alert watermark, per-cycle bill-alert keys, idempotency keys — key
+formats in `state_keys.py`) · `events` + `processed_callbacks` (relabel loop) ·
+`quarantine` (rows that cannot be booked — non-EUR, sign-ambiguous, malformed —
+kept with the raw row + reason, deduped by fingerprint, surfaced in `/status`;
+migration 006). No `budgets`, `llm_calls`, envelope, or graduation tables (v1
+`schema.sql` creates `budgets`; migration 005 drops it and removes the dead
+`'llm'` provenance value).
 
 ---
 
 ## 6. Ops & cadence
 
-Cron (Europe/Dublin): 4 unattended `make poll` (the one ingest path —
-ingest+categorize+alerts, consuming the ~4/day PSD2 allowance via a serialized
-`BEGIN IMMEDIATE` read-modify-write) · `make notify` 08:00 · `make plan` Monday ·
-`make digest` Sunday · nightly `make backup`. `/sync` is owner-initiated
-(attended): it sends `Psu-Ip-Address` (this host's real LAN IP, or a
-config override — never a loopback fiction) / `Psu-User-Agent` headers → exempt
-from the unattended allowance (RTS Art. 36(5)), and it categorizes + alerts like
-a poll. One transient bank 5xx gets a bounded, jittered retry before the run
-gives up. Consent ≤180 days; re-auth is `authorize.py`.
+Cron (Europe/Dublin): 4 unattended `make poll` (the one ingest path — consent
+check, then ingest+categorize+policy/bill alerts, consuming the ~4/day PSD2
+allowance via a serialized `BEGIN IMMEDIATE` read-modify-write) · `make notify`
+08:00 (push only) · `make plan` Monday · `make digest` Sunday · nightly
+`make backup` (never VACUUM — it renumbers rowids under the alert watermark).
+None of the crons call `getUpdates`: command-answering is an always-on
+`--listen` reader (`sentinel-listen.service`, or the `@reboot` line in
+`deploy/crontab.txt`), the single getUpdates reader Telegram allows — units in
+`deploy/systemd/`. `/sync` is owner-initiated (attended): it
+sends `Psu-Ip-Address` (this host's real LAN IP, or a config override — never a
+loopback fiction) / `Psu-User-Agent` headers → exempt from the unattended
+allowance (RTS Art. 36(5)), and it categorizes + alerts like a poll. A transient
+bank 5xx or connection error gets a bounded, jittered retry; a 4xx fails fast,
+and a 401/403 (expired/revoked consent) is turned into a re-auth message. Consent
+≤180 days, with a T−14d expiry nag on every poll; re-auth is `authorize.py`.
 
 ---
 
@@ -127,9 +138,12 @@ gives up. Consent ≤180 days; re-auth is `authorize.py`.
 Secrets only in `.env` (git-ignored, `chmod 600`); private key referenced by
 path, never stored. Owner-specific PII (employer/landlord/family/bills) lives in
 git-ignored `rules.local.yaml` / `bills.local.yaml`, merged at load. The bot
-token is redacted from every error path (one send seam in `telegram.py`). Bot
-commands and inline taps are authorized by the **sender's** id (`from.id`), not
-the chat id, so pointing the bot at a group can't hand control to its members.
+token is redacted from every error path (one send seam in `telegram.py`).
+Delivery and authority are separate: pushes go to `TELEGRAM_CHAT_ID`, while bot
+commands and inline taps are authorized by the **sender's** id (`from.id`)
+against `TELEGRAM_OWNER_ID` (which defaults to the chat id). So the bot can be
+delivered into a group without handing control to its members, and the owner
+still drives it.
 `ledger.db`, `merchant_map.json`, reports, and `CODE-REVIEW.md` are git-ignored;
 the pre-commit hook (`scripts/pre-commit`) is portable — gitleaks + a grep
 against a **git-ignored** `.pii-patterns` file, so the hook's logic can be

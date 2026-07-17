@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from sentinel import csv_import, db, ingest
+from sentinel import csv_import, db, ingest, state_keys
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SAMPLE_CSV = FIXTURES / "aib_backfill_sample.csv"
@@ -148,8 +148,13 @@ def test_identical_same_day_rows_both_kept(conn):
     assert total == -700
 
 
-def test_api_csv_cross_source_dedupe(conn):
-    """CSV backfill overlapping an API pull: the shared row lands once (SPEC §2)."""
+def test_api_csv_hash_dedupe_only_when_merchant_strings_coincide(conn):
+    """A mechanism check for the RARE convergence in which hash-dedupe can fire:
+    an API row with no entry_reference whose creditor name is byte-identical to
+    the CSV description. This is NOT the load-bearing guard — the two sources
+    usually derive merchant_raw differently, so the hashes differ (see the
+    csv_import docstring). The real defense is the date clip, pinned by
+    test_clip_before_prevents_cross_source_double_count."""
     csv_import.import_file(conn, SAMPLE_CSV, ACCOUNT_MAP)
     conn.commit()
     inserted, submitted = ingest.run_ingest(
@@ -166,6 +171,60 @@ def test_api_csv_cross_source_dedupe(conn):
 
 def test_pending_api_rows_are_skipped():
     assert ingest.map_api_transaction(EB_PAYLOAD[3], API_ACCOUNT_UID) is None
+
+
+class _TruncatingClient:
+    """A client that hits the page cap (as EnableBankingClient does) and records
+    the account in truncated_accounts, so run_ingest can hold the cursor."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.truncated_accounts: set[str] = set()
+
+    def iter_transactions(self, account_uid, date_from, **kw):
+        self.truncated_accounts.add(account_uid)
+        yield from self.rows
+
+
+def test_truncated_pagination_holds_the_cursor(conn):
+    """On page-cap truncation, rows still land but the cursor must NOT advance
+    past the unfetched (older) window, or those rows fall outside every future
+    pull forever."""
+    client = _TruncatingClient([{
+        "entry_reference": "R1", "booking_date": "2026-02-09",
+        "transaction_amount": {"amount": "10.00", "currency": "EUR"},
+        "credit_debit_indicator": "DBIT", "status": "BOOK", "creditor": {"name": "SHOP"}}])
+    inserted, _ = ingest.run_ingest(conn, client, [API_ACCOUNT_UID], default_from="2026-01-01")
+    assert inserted == 1, "the fetched prefix still books"
+    assert db.get_state(conn, state_keys.cursor(API_ACCOUNT_UID)) is None, "cursor held, not advanced"
+
+
+def test_non_eur_api_row_is_quarantined_and_recorded(conn):
+    payload = [{"entry_reference": "FX-1", "booking_date": "2026-02-01",
+                "transaction_amount": {"amount": "10.00", "currency": "USD"},
+                "credit_debit_indicator": "DBIT", "status": "BOOK", "creditor": {"name": "US SHOP"}}]
+    inserted, _ = ingest.run_ingest(conn, FakeClient(payload), [API_ACCOUNT_UID], default_from="2026-01-01")
+    assert inserted == 0, "the non-EUR row must not book at face value"
+    assert db.quarantine_count(conn) == 1, "it is retained in quarantine, not vaporized"
+    q = conn.execute("SELECT source, reason FROM quarantine").fetchone()
+    assert q["source"] == "api" and "USD" in q["reason"]
+
+
+def test_sign_ambiguous_api_row_is_quarantined(conn):
+    payload = [{"entry_reference": "AMB-1", "booking_date": "2026-02-01",
+                "transaction_amount": {"amount": "10.00", "currency": "EUR"},
+                "status": "BOOK", "creditor": {"name": "MYSTERY"}}]  # no credit_debit_indicator
+    inserted, _ = ingest.run_ingest(conn, FakeClient(payload), [API_ACCOUNT_UID], default_from="2026-01-01")
+    assert inserted == 0, "a sign-ambiguous row must not be booked as a guessed sign"
+    assert db.quarantine_count(conn) == 1
+    assert "credit_debit_indicator" in conn.execute("SELECT reason FROM quarantine").fetchone()[0]
+
+
+def test_first_pull_records_the_api_coverage_start(conn):
+    """The clip boundary the CSV backfill trusts is anchored to a recorded fact,
+    not an aggregate over row dates (compute_clip_before, N6)."""
+    ingest.run_ingest(conn, FakeClient(), [API_ACCOUNT_UID], default_from="2026-01-01")
+    assert db.get_state(conn, state_keys.API_COVERAGE_START) == "2026-01-01"
 
 
 def test_api_mapping_signs_and_fields():

@@ -12,6 +12,11 @@ ln -sf ../../scripts/pre-commit "$hooks_dir/pre-commit"
 chmod +x "$root/scripts/pre-commit"
 echo "installed: .git/hooks/pre-commit -> scripts/pre-commit"
 
-if [ ! -f "$root/.pii-patterns" ]; then
-  echo "note: no .pii-patterns yet — cp .pii-patterns.example .pii-patterns and fill it in." >&2
+if [ -f "$root/.pii-patterns" ]; then
+  # The blocklist IS a list of crown-jewel strings, so it must not be world- or
+  # group-readable like .env and ledger.db already aren't. Enforce 0600.
+  chmod 600 "$root/.pii-patterns"
+  echo "secured: .pii-patterns is 0600"
+else
+  echo "note: no .pii-patterns yet — cp .pii-patterns.example .pii-patterns, fill it in, chmod 600 it." >&2
 fi

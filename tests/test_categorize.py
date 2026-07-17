@@ -116,6 +116,16 @@ def test_relink_is_atomic_and_preserves_manual_labels(conn, tmp_path):
     assert tuple(row) == ("Dates", "manual")
 
 
+def test_relink_dry_run_previews_and_rolls_back(conn, tmp_path):
+    cfg = make_cfg(tmp_path, merchant_map=OWNER_MAP)
+    categorize.run(conn, cfg)
+    before = conn.execute("SELECT id, category, categorized_by FROM merchants ORDER BY id").fetchall()
+    stats = categorize.relink(conn, cfg, dry_run=True)
+    assert stats["linked"] == len(LEDGER), "reports what the rebuild WOULD link"
+    after = conn.execute("SELECT id, category, categorized_by FROM merchants ORDER BY id").fetchall()
+    assert [tuple(r) for r in after] == [tuple(r) for r in before], "rolled back — merchants unchanged"
+
+
 def test_second_run_is_idempotent(conn, tmp_path):
     cfg = make_cfg(tmp_path, merchant_map=OWNER_MAP)
     categorize.run(conn, cfg)
@@ -147,10 +157,12 @@ def test_dry_run_writes_nothing(conn, tmp_path):
 def test_migrations_apply_and_view_exists(tmp_path):
     conn = db.connect(tmp_path / "ledger.db")
     # schema v1 + 002 view + 003 drop llm_calls + 004 events + 005 drop budgets/llm-check
-    assert db.init_db(conn) == 5
+    # + 006 quarantine
+    assert db.init_db(conn) == 6
     assert conn.execute("SELECT COUNT(*) FROM v_transactions_categorized").fetchone()[0] == 0
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "budgets" not in tables, "migration 005 must drop the dead budgets table"
+    assert "quarantine" in tables, "migration 006 must create the quarantine table"
     conn.close()
 
 

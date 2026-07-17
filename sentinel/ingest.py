@@ -115,6 +115,9 @@ class EnableBankingClient:
         self.max_retries = max_retries
         self.retry_backoff = retry_backoff
         self.max_pages = max_pages
+        # Accounts whose last pull hit the page cap, so run_ingest can refuse to
+        # advance their cursor past an unfetched window (SPEC §2 / §6).
+        self.truncated_accounts: set[str] = set()
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {make_jwt(self.app_id, self.private_key_path)}"}
@@ -122,10 +125,13 @@ class EnableBankingClient:
     def _get_json(self, url: str, params: dict[str, str],
                   psu_headers: dict[str, str] | None) -> dict[str, Any]:
         """
-        GET with a bounded, jittered retry.
+        GET with a bounded, jittered retry on *transient* failures only.
 
-        The daily allowance unit is consumed before this call, so a transient
-        5xx is retried rather than discarding the pull on the first failure.
+        The daily allowance unit is consumed before this call, so a connection
+        error or a 5xx is retried rather than discarding the pull. A 4xx is
+        deterministic — a bad request, or an expired/revoked consent (401/403) —
+        so it is raised immediately: retrying it just burns three more attempts,
+        four times a day, forever.
         """
         last_exc: Exception | None = None
         for attempt in range(self.max_retries + 1):
@@ -133,15 +139,19 @@ class EnableBankingClient:
                 resp = requests.get(url, params=params,
                                     headers={**self._headers(), **(psu_headers or {})},
                                     timeout=HTTP_TIMEOUT)
-                resp.raise_for_status()
-                return resp.json()
             except requests.RequestException as exc:
-                last_exc = exc
-                if attempt < self.max_retries:
-                    delay = self.retry_backoff * (2 ** attempt) * (1 + random.random() * 0.5)
-                    log.warning("bank GET failed (attempt %d/%d), retry in %.1fs: %s",
-                                attempt + 1, self.max_retries + 1, delay, exc)
-                    time.sleep(delay)
+                last_exc = exc  # no response at all (DNS/connect/timeout) — transient
+            else:
+                if resp.status_code < 400:
+                    return resp.json()
+                if resp.status_code < 500:
+                    resp.raise_for_status()  # 4xx — fail fast, do not retry
+                last_exc = requests.HTTPError(f"{resp.status_code} server error", response=resp)
+            if attempt < self.max_retries:
+                delay = self.retry_backoff * (2 ** attempt) * (1 + random.random() * 0.5)
+                log.warning("bank GET failed (attempt %d/%d), retry in %.1fs: %s",
+                            attempt + 1, self.max_retries + 1, delay, last_exc)
+                time.sleep(delay)
         assert last_exc is not None
         raise last_exc
 
@@ -153,8 +163,10 @@ class EnableBankingClient:
         psu_headers (Psu-Ip-Address, Psu-User-Agent) signal PSU-present, attended
         access, which the ASPSP exempts from the unattended limit. Pagination is
         bounded by max_pages so a misbehaving continuation_key cannot loop
-        indefinitely.
+        indefinitely; if the cap is hit the account is recorded in
+        truncated_accounts so the cursor is not advanced past the unfetched rows.
         """
+        self.truncated_accounts.discard(account_uid)
         url = f"{self.base_url}/accounts/{account_uid}/transactions"
         params: dict[str, str] = {"date_from": date_from}
         for _page in range(self.max_pages):
@@ -164,6 +176,7 @@ class EnableBankingClient:
             if not continuation:
                 return
             params = {"date_from": date_from, "continuation_key": continuation}
+        self.truncated_accounts.add(account_uid)
         log.warning("account %s: hit max_pages=%d — stopping pagination (runaway continuation_key?)",
                     account_uid, self.max_pages)
 
@@ -174,7 +187,8 @@ class EnableBankingClient:
 def map_api_transaction(txn: dict[str, Any], account_uid: str) -> dict[str, Any] | None:
     """
     Convert Enable Banking transaction JSON to a ledger row. Returns None to skip
-    a non-booked row.
+    a legitimately non-bookable-yet row (pending, or no date); raises on an
+    un-bookable row (sign-ambiguous) so the caller quarantines it.
 
     A pure local mapping. Amounts arrive as decimal strings and stay integer
     cents.
@@ -197,10 +211,10 @@ def map_api_transaction(txn: dict[str, Any], account_uid: str) -> dict[str, Any]
         cents = abs(cents)
     else:
         # No direction → the sign would be a guess; reject rather than book a
-        # debit as income.
-        log.warning("quarantined txn %s: no credit_debit_indicator (sign unknown)",
-                    txn.get("entry_reference"))
-        return None
+        # debit as income. Raise (not return None) so run_ingest quarantines it to
+        # the table instead of silently skipping — a sign-ambiguous row is a
+        # rejection, not a legitimately-skipped pending/undated row.
+        raise ValueError("no credit_debit_indicator (sign unknown)")
 
     remittance = txn.get("remittance_information") or []
     if isinstance(remittance, str):
@@ -247,6 +261,13 @@ def check_and_consume_allowance(conn, limit: int) -> bool:
 
 
 def warn_if_consent_expiring(conn, warn_days: int, dry_run: bool) -> None:
+    """
+    Warn the owner over Telegram when the AIB consent is within `warn_days` of
+    expiry, and, once expired, that every poll now fails until re-auth.
+
+    Idempotent per day via CONSENT_WARNED_ON. Called from run_poll (SPEC §6), so
+    the nag actually fires on a schedule rather than only from a manual CLI run.
+    """
     expiry_raw = db.get_state(conn, state_keys.CONSENT_EXPIRY)
     if not expiry_raw:
         log.info("no consent_expiry in state yet (Phase 0 pending?) — skipping expiry check")
@@ -255,8 +276,12 @@ def warn_if_consent_expiring(conn, warn_days: int, dry_run: bool) -> None:
     days_left = (date.fromisoformat(expiry_raw[:10]) - today).days
     if days_left > warn_days:
         return
-    message = (f"⚠️ Sentinel: bank consent expires in {days_left} day(s) "
-               f"({expiry_raw[:10]}). Re-auth via the Phase 0 runbook (~2 min).")
+    if days_left < 0:
+        message = (f"🔴 Sentinel: bank consent EXPIRED {-days_left} day(s) ago ({expiry_raw[:10]}). "
+                   "Polls fail until you re-auth via the Phase 0 runbook (~2 min).")
+    else:
+        message = (f"⚠️ Sentinel: bank consent expires in {days_left} day(s) "
+                   f"({expiry_raw[:10]}). Re-auth via the Phase 0 runbook (~2 min).")
     log.warning(message)
     if dry_run:
         return
@@ -268,6 +293,33 @@ def warn_if_consent_expiring(conn, warn_days: int, dry_run: bool) -> None:
         log.warning("consent warning not sent: %s", exc)
         return
     db.set_state(conn, state_keys.CONSENT_WARNED_ON, today.isoformat())
+    conn.commit()
+
+
+def warn_on_auth_error(conn, exc: Exception) -> None:
+    """
+    On a bank 401/403 (consent expired or revoked), tell the owner over Telegram,
+    once per day.
+
+    The T−14d nag (warn_if_consent_expiring) only fires while `consent_expiry` is
+    known and near; a session revoked early, or a consent that lapses without the
+    date being refreshed, surfaces only as a hard auth failure. This turns that
+    failure into an actionable message instead of a silent 401 in an unread log.
+    """
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status not in (401, 403):
+        return
+    today = datetime.now(db.TZ).date().isoformat()
+    if db.get_state(conn, state_keys.CONSENT_ERROR_NOTIFIED_ON) == today:
+        return
+    try:
+        telegram.send_message(
+            f"🔴 Sentinel: the bank rejected the last pull (HTTP {status} — consent expired "
+            "or revoked). Re-auth via the Phase 0 runbook (~2 min).")
+    except telegram.NotifyError as e:
+        log.warning("consent-error notice not sent: %s", e)
+        return
+    db.set_state(conn, state_keys.CONSENT_ERROR_NOTIFIED_ON, today)
     conn.commit()
 
 
@@ -299,6 +351,7 @@ def run_ingest(
     total_submitted = 0
     for uid in account_uids:
         cursor_date = db.get_state(conn, state_keys.cursor(uid))
+        first_pull = not date_from and not cursor_date
         if date_from:
             since = date_from
         elif cursor_date:
@@ -306,6 +359,14 @@ def run_ingest(
                      - timedelta(days=cursor_overlap_days)).isoformat()
         else:
             since = default_from
+        if first_pull and not dry_run:
+            # The clip boundary the CSV backfill trusts is a fact about *coverage*,
+            # not an aggregate over row dates: record where the API window begins,
+            # so a single backdated booking can't drag it back and amputate the
+            # backfill (compute_clip_before, SPEC §2).
+            prior = db.get_state(conn, state_keys.API_COVERAGE_START)
+            if prior is None or since < prior:
+                db.set_state(conn, state_keys.API_COVERAGE_START, since)
         rows, rejected = [], 0
         extra = {"psu_headers": psu_headers} if psu_headers else {}
         for txn in client.iter_transactions(uid, since, **extra):
@@ -315,6 +376,7 @@ def run_ingest(
                     raise ValueError(f"non-{currency} booked currency {mapped['currency']!r}")
             except Exception as exc:  # one poisoned row must not blind the whole poll
                 rejected += 1
+                db.quarantine_row(conn, "api", str(exc), txn, uid)
                 log.warning("quarantined malformed txn %s: %s", txn.get("entry_reference"), exc)
                 continue
             if mapped:
@@ -326,7 +388,14 @@ def run_ingest(
         total_submitted += submitted
         log.info("account %s: since %s, %d fetched, %d new, %d duplicate",
                  uid, since, submitted, inserted, submitted - inserted)
-        if rows and not dry_run:
+        truncated = uid in getattr(client, "truncated_accounts", set())
+        if truncated:
+            # The page cap was hit, so an older window went unfetched. If the bank
+            # pages newest-first, advancing the cursor to the newest fetched date
+            # would strand that window outside every future pull — so hold the
+            # cursor and re-attempt from it next run.
+            log.warning("account %s: pagination truncated — cursor held, not advanced past the hole", uid)
+        elif rows and not dry_run:
             # Advance the cursor to the max booking_date SEEN this pull, but never
             # regress it: an overlap pull that returns only backdated rows must
             # not drag the high-water mark backwards.

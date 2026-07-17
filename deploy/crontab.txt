@@ -1,17 +1,26 @@
-# Sentinel scheduled jobs — machine is on Europe/Dublin local time.
-# Uses explicit flags that do NOT call getUpdates, so they never conflict with
-# the always-on `--listen` LaunchAgent (Telegram allows one getUpdates reader).
+# Sentinel scheduled jobs — the SIMPLE local option (a laptop/box on cron).
+# The production always-on deploy is systemd + auto-deploy: see deploy/systemd/
+# (sentinel-listen.service is the listener there). Use ONE of the two, not both.
+#
+# Machine is on Europe/Dublin local time. The timed jobs use explicit flags that
+# do NOT call getUpdates; the @reboot line is the always-on `--listen` reader
+# (the single getUpdates reader Telegram allows), kept single-instance by flock.
+# Each line creates logs/ first so a fresh deploy can't fail the redirect before
+# Python starts (make init also creates it).
 # Install with:  crontab deploy/crontab.txt      Inspect with:  crontab -l
 UV=/Users/nimo/.local/bin/uv
 REPO=/Users/nimo/Desktop/personal-dev/sentinel
 
-# 4 unattended polls/day (PSD2 ~4/day): ingest -> categorize -> policy alerts
-45 7,12,17,21 * * * cd $REPO && $UV run python -m sentinel.notify --poll >> logs/poll.log 2>&1
+# Always-on command/tap listener — restarted at boot, single instance via flock.
+@reboot cd $REPO && mkdir -p logs && /usr/bin/flock -n /tmp/sentinel-listen.lock $UV run python -m sentinel.notify --listen >> logs/listen.log 2>&1
+# 4 unattended polls/day (PSD2 ~4/day): consent check -> ingest -> categorize -> policy/bill alerts
+45 7,12,17,21 * * * cd $REPO && mkdir -p logs && $UV run python -m sentinel.notify --poll >> logs/poll.log 2>&1
 # 08:00 daily safe-to-spend push
-0 8 * * *  cd $REPO && $UV run python -m sentinel.notify --push >> logs/push.log 2>&1
+0 8 * * *  cd $REPO && mkdir -p logs && $UV run python -m sentinel.notify --push >> logs/push.log 2>&1
 # Monday 08:05 weekly plan
-5 8 * * 1  cd $REPO && $UV run python -m sentinel.notify --plan >> logs/plan.log 2>&1
+5 8 * * 1  cd $REPO && mkdir -p logs && $UV run python -m sentinel.notify --plan >> logs/plan.log 2>&1
 # Sunday 18:00 weekly digest (bills checklist + surplus line)
-0 18 * * 0 cd $REPO && $UV run python -m sentinel.notify --digest >> logs/digest.log 2>&1
-# Nightly 02:30 safe backup (sqlite .backup, never cp a live WAL DB)
-30 2 * * * cd $REPO && mkdir -p backups && sqlite3 ledger.db ".backup 'backups/ledger-$(date +\%F).db'" >> logs/backup.log 2>&1
+0 18 * * 0 cd $REPO && mkdir -p logs && $UV run python -m sentinel.notify --digest >> logs/digest.log 2>&1
+# Nightly 02:30 safe backup (sqlite .backup, never cp a live WAL DB — and never
+# VACUUM: it renumbers rowids and can slip a row under the alert watermark, see state_keys.py)
+30 2 * * * cd $REPO && mkdir -p logs backups && sqlite3 ledger.db ".backup 'backups/ledger-$(date +\%F).db'" >> logs/backup.log 2>&1

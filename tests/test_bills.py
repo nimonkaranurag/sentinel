@@ -41,8 +41,6 @@ EOM_BILL = ("grace_days: 3\nbills:\n"
 
 
 def test_end_of_month_bill_is_late_across_the_month_boundary(tmp_path):
-    """due_day 28, nothing paid, now 4 Mar → 5 days past due. The old
-    `as_of.day > 28 + 3` test needed day > 31 and could NEVER fire."""
     conn = _conn_with(tmp_path, [])  # nothing paid
     p = _bills_file(tmp_path, EOM_BILL)
     # Feb 28 + 3 grace = Mar 3; as_of within grace (Mar 2) is silent…
@@ -99,6 +97,31 @@ def test_late_alerts_only_past_due_plus_grace(tmp_path):
     assert bills.check(conn, {}, date(2026, 7, 16), path=_bills_file(tmp_path)) == []  # within grace
     late = bills.check(conn, {}, date(2026, 7, 20), path=_bills_file(tmp_path))        # day 20 > 15+3
     assert len(late) == 1 and late[0]["kind"] == "late"
+    conn.close()
+
+
+def test_early_match_window_is_configurable(tmp_path):
+    """A DD posting several days early counts as paying the cycle only within the
+    configured window — the knob lives in config, not hardcoded (N16)."""
+    conn = _conn_with(tmp_path, _paid(day="2026-07-11"))  # paid 4 days before due_day 15
+    p = _bills_file(tmp_path)
+    # Default window is 5 days → the early charge counts, so no late alert.
+    assert bills.check(conn, {}, date(2026, 7, 20), path=p) == []
+    # Narrow the window to 2 days → the same charge no longer counts for this cycle.
+    late = bills.check(conn, {"bills": {"early_match_days": 2}}, date(2026, 7, 20), path=p)
+    assert len(late) == 1 and late[0]["kind"] == "late"
+    conn.close()
+
+
+def test_send_alerts_fires_once_per_cycle(tmp_path, monkeypatch):
+    conn = _conn_with(tmp_path, [])  # nothing paid → Broadband is late by 2026-07-20
+    sent = []
+    monkeypatch.setattr(bills.telegram, "send_message", lambda msg: sent.append(msg))
+    cfg = {"bills": {"path": str(_bills_file(tmp_path))}}
+    assert bills.send_alerts(conn, cfg, date(2026, 7, 20)) == 1
+    assert len(sent) == 1 and "unpaid" in sent[0]
+    assert bills.send_alerts(conn, cfg, date(2026, 7, 20)) == 0  # same cycle → guard holds
+    assert len(sent) == 1
     conn.close()
 
 

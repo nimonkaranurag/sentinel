@@ -50,15 +50,16 @@ def spend_by_bucket(conn, start: date, end: date, inflow_exclude_cents: int = 0)
 
     Amounts are netted, not summed as outflows only: a positive amount in a
     spend category is a refund and offsets the matching purchase, so refunds do
-    not deplete the pool or trigger false alerts. A single inflow at or above
-    `inflow_exclude_cents` (for example an unmapped family transfer) is not a
-    refund and is excluded from the netting until it is labeled Income or
-    Transfers.
+    not deplete the pool or trigger false alerts. Only a *large, Uncategorized*
+    inflow (an unmapped transfer, at or above `inflow_exclude_cents`) is held out
+    of the netting until it is labeled — a big refund the categorizer has already
+    attached to a known merchant is exactly the case netting is for, so it must
+    still net.
     """
     clause = ""
     params: list[Any] = [start.isoformat(), end.isoformat()]
     if inflow_exclude_cents > 0:
-        clause = "AND amount_cents < ? "
+        clause = "AND NOT (amount_cents >= ? AND category = 'Uncategorized') "
         params.append(inflow_exclude_cents)
     rows = conn.execute(
         "SELECT category, SUM(-amount_cents) AS spend FROM v_transactions_categorized "
@@ -74,15 +75,19 @@ def spend_by_bucket(conn, start: date, end: date, inflow_exclude_cents: int = 0)
 
 def unlabeled_inflows(conn, start: date, end: date, threshold_cents: int) -> tuple[int, int]:
     """
-    Return (count, total_cents) of the large inflows excluded from the pool, so
-    they can be surfaced for labeling rather than silently dropped.
+    Return (count, total_cents) of the large *Uncategorized* inflows held out of
+    the pool, so they can be surfaced for labeling rather than silently dropped.
+
+    Scoped to Uncategorized to match spend_by_bucket: a large inflow the
+    categorizer already attached to a known merchant is a refund that nets, not an
+    unlabeled transfer, so it belongs in neither this count nor the exclusion.
     """
     if threshold_cents <= 0:
         return 0, 0
     row = conn.execute(
         "SELECT COUNT(*) AS n, COALESCE(SUM(amount_cents), 0) AS total "
         "FROM v_transactions_categorized "
-        "WHERE category NOT IN ('Income', 'Transfers') AND amount_cents >= ? "
+        "WHERE category = 'Uncategorized' AND amount_cents >= ? "
         "AND booking_date >= ? AND booking_date <= ?",
         (threshold_cents, start.isoformat(), end.isoformat()),
     ).fetchone()
@@ -116,20 +121,26 @@ def safe_to_spend(conn, cfg: dict[str, Any], as_of: date) -> dict[str, Any]:
     }
 
 
-def month_surplus(conn, month_key: str) -> dict[str, Any]:
+def month_surplus(conn, month_key: str, inflow_exclude_cents: int = 0) -> dict[str, Any]:
     """
     Return income minus spend for one calendar month.
 
     Transfers and Income are excluded from spend by construction, so the surplus
-    measures spending independent of family transfers.
+    measures spending independent of family transfers. Spend is *netted*: a
+    positive amount in a spend category is a refund and reduces spend, exactly as
+    in spend_by_bucket — except a large Uncategorized inflow (>= the exclude
+    threshold), which is an unlabeled transfer rather than a refund and must not
+    flatter the surplus.
     """
+    exclude = "AND NOT (amount_cents >= ? AND category = 'Uncategorized') " if inflow_exclude_cents > 0 else ""
+    params: list[Any] = ([inflow_exclude_cents] if inflow_exclude_cents > 0 else []) + [month_key]
     row = conn.execute(
         "SELECT "
         "  SUM(CASE WHEN amount_cents > 0 AND category = 'Income' THEN amount_cents ELSE 0 END) AS income, "
-        "  SUM(CASE WHEN amount_cents < 0 AND category NOT IN ('Transfers', 'Income') "
+        "  SUM(CASE WHEN category NOT IN ('Transfers', 'Income') " + exclude +
         "      THEN -amount_cents ELSE 0 END) AS spend "
         "FROM v_transactions_categorized WHERE strftime('%Y-%m', booking_date) = ?",
-        (month_key,),
+        params,
     ).fetchone()
     income, spend = int(row["income"] or 0), int(row["spend"] or 0)
     return {"month": month_key, "income_cents": income, "spend_cents": spend,
@@ -146,7 +157,7 @@ def graduation_surplus(conn, cfg: dict[str, Any], as_of: date) -> dict[str, Any]
     target = int((cfg.get("controller") or {}).get("graduation_surplus_cents", 100_000))
     month_start, _, _ = month_bounds(as_of)
     prev_key = (month_start - timedelta(days=1)).strftime("%Y-%m")
-    s = month_surplus(conn, prev_key)
+    s = month_surplus(conn, prev_key, unlabeled_inflow_exclude_cents(cfg))
     return {**s, "target_cents": target, "met": s["surplus_cents"] >= target}
 
 

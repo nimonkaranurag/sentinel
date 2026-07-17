@@ -19,7 +19,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import alerts, categorize, db, ingest, render, state_keys, telegram
+from . import alerts, bills, categorize, db, ingest, render, state_keys, telegram
 
 log = logging.getLogger(__name__)
 
@@ -106,8 +106,10 @@ def do_sync(conn, cfg: dict[str, Any]) -> str:
             currency=cfg.get("currency", "EUR"))
         # Attended ingest must also categorize + alert — else a charge that
         # arrives via /sync, precisely when you're watching, can never alert.
+        today = datetime.now(db.TZ).date()
         categorize.run(conn, cfg)
-        fired = alerts.poll_alerts(conn, cfg, datetime.now(db.TZ).date())
+        fired = alerts.poll_alerts(conn, cfg, today)
+        fired += bills.send_alerts(conn, cfg, today)  # late/drift bills fire here too
         return f"Synced: {inserted} new / {submitted} fetched (attended); {fired} alert(s)."
     except Exception as exc:  # bank errors must never crash the bot loop
         log.warning("/sync failed: %s", exc)
@@ -169,15 +171,18 @@ def handle_callback(conn, cfg: dict[str, Any], callback: dict[str, Any]) -> None
     telegram.answer_callback(cb_id)
 
 
-def _handle_update(conn, cfg: dict[str, Any], update: dict[str, Any], chat_id: str,
+def _handle_update(conn, cfg: dict[str, Any], update: dict[str, Any], owner_id: str,
                    as_of: date, dry_run: bool) -> bool:
     """
     Dispatch one update. Returns True if it was an owner action that was handled.
+
+    Authorization is the sender's `from.id` against the owner id (not the chat
+    id), so the bot can be delivered into a group while only the owner drives it.
     """
     callback = update.get("callback_query")
     if callback:
         sender = str((callback.get("from") or {}).get("id", ""))  # WHO tapped
-        if sender != str(chat_id):
+        if sender != str(owner_id):
             log.warning("ignoring callback from non-owner sender %s", sender or "?")
             return False
         if not dry_run:
@@ -186,7 +191,7 @@ def _handle_update(conn, cfg: dict[str, Any], update: dict[str, Any], chat_id: s
     message = update.get("message") or {}
     text = message.get("text") or ""
     sender = str((message.get("from") or {}).get("id", ""))  # WHO sent
-    if sender != str(chat_id):
+    if sender != str(owner_id):
         log.warning("ignoring message from non-owner sender %s", sender or "?")
         return False
     if not text.startswith("/"):
@@ -206,17 +211,23 @@ def process_updates(conn, cfg: dict[str, Any], as_of: date | None = None,
     set.
 
     In listen mode a transient getUpdates error backs off and retries rather
-    than killing the loop; the offset is committed per update, so a failure does
-    not replay the whole batch.
+    than killing the loop; every update advances the offset even if its handler
+    throws, so one poison update can neither replay the batch nor crash-loop the
+    listener. Under --dry-run the offset is tracked in memory only (never
+    persisted), so listen+dry-run cannot busy-spin re-reading the same batch.
     """
-    _, chat_id = telegram.credentials()
+    owner = telegram.owner_id()
     as_of = as_of or datetime.now(db.TZ).date()
     tg_cfg = cfg.get("telegram") or {}
     timeout = int(tg_cfg.get("poll_timeout_seconds", 50)) if listen else 0
     backoff = float(tg_cfg.get("listen_backoff_seconds", 3))
     handled = 0
+    local_offset: int | None = None  # dry-run cursor, advanced in memory
     while True:
-        offset = int(db.get_state(conn, state_keys.TG_UPDATE_OFFSET, "0") or "0")
+        if dry_run and local_offset is not None:
+            offset = local_offset
+        else:
+            offset = int(db.get_state(conn, state_keys.TG_UPDATE_OFFSET, "0") or "0")
         try:
             updates = telegram.get_updates(offset, timeout)
         except telegram.NotifyError as exc:
@@ -227,15 +238,27 @@ def process_updates(conn, cfg: dict[str, Any], as_of: date | None = None,
             time.sleep(delay)
             continue
         for update in updates:
-            next_offset = int(update["update_id"]) + 1
+            uid = update.get("update_id")
+            if uid is None:
+                log.warning("skipping update with no update_id: %r", update)
+                continue
+            next_offset = int(uid) + 1
             try:
-                if _handle_update(conn, cfg, update, chat_id, as_of, dry_run):
+                if _handle_update(conn, cfg, update, owner, as_of, dry_run):
                     handled += 1
             except telegram.NotifyError as exc:
-                # a reply/edit failed to send; log and keep going. The offset still
-                # advances below, so we don't spin forever on one bad update.
-                log.warning("update %s: handler send failed: %s", update.get("update_id"), exc)
-            if not dry_run:
+                # A reply/edit failed to send: log and advance past it below.
+                log.warning("update %s: handler send failed: %s", uid, exc)
+            except Exception as exc:
+                # Any other handler fault (a WAL lock, a malformed payload) must
+                # not kill the loop or wedge on one poison update: discard its
+                # partial work, log, and advance the offset past it.
+                log.warning("update %s: handler error, skipping: %s", uid, exc)
+                if not dry_run:
+                    conn.rollback()
+            if dry_run:
+                local_offset = next_offset
+            else:
                 db.set_state(conn, state_keys.TG_UPDATE_OFFSET, str(next_offset))
                 conn.commit()
         if not listen:

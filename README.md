@@ -7,7 +7,7 @@
 <a href=".python-version"><img src="https://img.shields.io/badge/python-3.12-3776AB?logo=python&amp;logoColor=white" alt="Python 3.12"></a>
 <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Ruff"></a>
 <a href="https://mypy-lang.org/"><img src="https://img.shields.io/badge/types-mypy-2A6DB2" alt="Types: mypy"></a>
-<a href=".github/workflows/ci.yml"><img src="https://img.shields.io/badge/coverage-%E2%89%A580%25-brightgreen" alt="Coverage &#8805;80%"></a>
+<a href=".github/workflows/ci.yml"><img src="https://img.shields.io/badge/coverage_gate-80%25-brightgreen" alt="Coverage gate 80%"></a>
 </p>
 </div>
 
@@ -102,7 +102,7 @@ pure-rendering layer can be tested in isolation:
 | Module | Responsibility |
 | --- | --- |
 | `telegram.py` | Bot API transport — the single HTTP seam, with token redaction |
-| `render.py` | Pure text and keyboard rendering (no I/O, no state) |
+| `render.py` | Read-only text and keyboard rendering (reads the ledger; no writes, network, or state mutation) |
 | `alerts.py` | Policy-alert engine with the durable watermark |
 | `commands.py` | Owner-only command and callback router |
 | `notify.py` | Cron orchestration and CLI entry point |
@@ -123,10 +123,10 @@ development adds `pytest`, `pytest-cov`, `ruff`, and `mypy`. All are installed b
 
 ```sh
 uv sync --dev                 # install dependencies into .venv
-make hooks                    # symlink the pre-commit secret/PII hook
-cp .pii-patterns.example .pii-patterns   # then fill in your own identifiers
-cp .env.example .env          # then fill in secrets (see below)
-make init                     # create data/reports/backups dirs, init the schema
+cp .pii-patterns.example .pii-patterns && chmod 600 .pii-patterns   # fill in your identifiers
+cp .env.example .env && chmod 600 .env                              # then fill in secrets (below)
+make hooks                    # symlink the pre-commit hook; also chmod 600 .pii-patterns
+make init                     # create data/reports/backups/logs dirs, init the schema
 ```
 
 1. **Secrets** live in `.env` (git-ignored): `ENABLE_BANKING_APP_ID`,
@@ -171,8 +171,8 @@ Nothing tunable is hardcoded; every knob lives in configuration.
 | `make categorize` | Run the categorizer cascade over pending merchants |
 | `make relink` | Rebuild merchant links after a normalizer or rule change (atomic) |
 | `make report` | Write the monthly `EXPENSE_REPORT.md` and charts |
-| `make poll` | Ingest → categorize → policy alerts (the cron path; consumes one API unit) |
-| `make notify` | Daily safe-to-spend push and answer pending commands |
+| `make poll` | Ingest → categorize → policy + bill alerts (the cron path; consumes one API unit) |
+| `make notify` | Daily safe-to-spend push only (command answering is the `--listen` process) |
 | `make plan` | Monday weekly-plan push (idempotent per ISO week) |
 | `make digest` | Sunday weekly digest |
 | `make backup` | Safe SQLite `.backup` (never a filesystem copy of a live WAL database) |
@@ -183,8 +183,10 @@ path, so a charge cannot book without being checked.
 
 ### Telegram commands
 
-Authorized by the **sender's** id, not the chat id — pointing the bot at a group
-does not let other members drive the ledger.
+Delivery goes to `TELEGRAM_CHAT_ID`; **authority** is the sender's id checked
+against `TELEGRAM_OWNER_ID` (which defaults to the chat id). So the bot can be
+pointed at a group without letting other members drive the ledger — set
+`TELEGRAM_OWNER_ID` to your own user id when the chat is a group.
 
 | Command | Effect |
 | --- | --- |
@@ -195,14 +197,32 @@ does not let other members drive the ledger.
 | `/recat <ref> <category>` | Recategorize a transaction and teach its merchant |
 | `/date <ref>` | Mark one transaction as `Dates`, leaving the merchant untouched |
 
-The inline `[✓ fine]` `[Reclassify…]` keyboard accompanies every alert.
+The inline `[✓ fine]` `[Reclassify…]` keyboard accompanies every alert. Answering
+commands and taps in real time needs the **listener** running (see Scheduling):
+
+```sh
+uv run python -m sentinel.notify --listen   # the single always-on getUpdates reader
+```
 
 ### Scheduling
 
-[`deploy/crontab.txt`](deploy/crontab.txt) runs the scheduled jobs (Europe/Dublin):
-four unattended polls per day (07:45, 12:45, 17:45, 21:45), the 08:00 daily push,
-the Monday 08:05 plan, the Sunday 18:00 digest, and a 02:30 nightly backup. Each
-push is idempotent per period, so a re-run cron cannot double-send.
+Two pieces, deliberately split so nothing collides on Telegram's single-reader
+`getUpdates`:
+
+1. **Scheduled jobs** (push-only, never call `getUpdates`) — four unattended polls
+   per day (07:45, 12:45, 17:45, 21:45), the 08:00 daily push, the Monday 08:05
+   plan, the Sunday 18:00 digest, and a 02:30 nightly backup. Each push is
+   idempotent per period, so a re-run cannot double-send.
+2. **Listener** (`--listen`) — the one `getUpdates` reader; it answers `/commands`
+   and inline taps in real time. Without it, a tap sits in Telegram's queue until
+   the next attended pass, so it is **required, not optional**.
+
+The production deploy is an always-on Linux host running the systemd units in
+[`deploy/systemd/`](deploy/systemd/) — the listener is `sentinel-listen.service`
+and the scheduled jobs are the `sentinel-*.timer` units — with push-to-`main`
+auto-deploy via [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml).
+For a laptop, [`deploy/crontab.txt`](deploy/crontab.txt) is a self-contained
+alternative: the timed jobs plus a `@reboot` flock'd `--listen`.
 
 ## Testing and quality
 
@@ -224,9 +244,10 @@ alert watermark, sender-id authorization) is pinned by a test.
   Information Services and cannot move money. It never stores bank credentials;
   access is a short-lived, locally signed JWT.
 - **Money integrity.** Integer cents throughout, with STRICT tables refusing
-  non-integers. Ingest quarantines malformed rows per row and rejects
-  sign-ambiguous and non-EUR entries; the CSV backfill clips to the API window to
-  avoid double-counting.
+  non-integers. Ingest rejects sign-ambiguous and non-EUR entries into a
+  `quarantine` table (retained with the raw row and reason, surfaced as a count in
+  `/status`) rather than dropping them silently; the CSV backfill clips to the API
+  window to avoid double-counting.
 - **Secrets and PII stay out of git.** `.env`, `ledger.db`, `merchant_map.json`,
   `rules.local.yaml`, `bills.local.yaml`, and `.pii-patterns` are git-ignored. The
   portable pre-commit hook (gitleaks, generic secret shapes, and a grep against
@@ -237,6 +258,8 @@ See [`docs/PRIVACY.md`](docs/PRIVACY.md) for the full data-handling policy.
 
 ## License and use
 
-A personal, non-commercial project, provided as-is without warranty and not
-offered as a service to third parties. See [`docs/TERMS.md`](docs/TERMS.md) and
-[`docs/PRIVACY.md`](docs/PRIVACY.md).
+Licensed under the **PolyForm Noncommercial License 1.0.0** — see
+[`LICENSE`](LICENSE). A personal, non-commercial project, provided as-is without
+warranty and not offered as a service to third parties. See
+[`docs/TERMS.md`](docs/TERMS.md) and [`docs/PRIVACY.md`](docs/PRIVACY.md); the key
+design decisions are recorded as ADRs in [`docs/adr/`](docs/adr/).

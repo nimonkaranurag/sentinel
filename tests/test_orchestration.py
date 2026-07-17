@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -181,3 +181,100 @@ def test_post_telegram_non_json_reply_is_notifyerror(monkeypatch):
     monkeypatch.setattr(telegram.requests, "post", lambda *a, **k: FakeResp())
     with pytest.raises(telegram.NotifyError, match="non-JSON"):
         telegram._post_telegram("secret-token", "getUpdates", {})
+
+
+# ── Consent-expiry nag fires from the poll (N21) ────────────────────────────
+
+
+def test_run_poll_warns_on_consent_expiry_once_per_day(env):
+    conn, cfg, fake = env
+    today = datetime.now(db.TZ).date()
+    db.set_state(conn, state_keys.CONSENT_EXPIRY, (today + timedelta(days=10)).isoformat())
+    conn.commit()
+    notify.run_poll(conn, cfg, as_of=today)
+    warns = [m for m in fake.sent if "consent expires" in m["text"]]
+    assert len(warns) == 1, "the T−14d nag must fire from the scheduled poll, not only the CLI"
+    notify.run_poll(conn, cfg, as_of=today)  # same day → idempotent
+    assert len([m for m in fake.sent if "consent expires" in m["text"]]) == 1
+
+
+def test_run_poll_warns_that_expired_consent_blocks_polls(env):
+    conn, cfg, fake = env
+    today = datetime.now(db.TZ).date()
+    db.set_state(conn, state_keys.CONSENT_EXPIRY, (today - timedelta(days=2)).isoformat())
+    conn.commit()
+    notify.run_poll(conn, cfg, as_of=today)
+    assert any("EXPIRED" in m["text"] and "re-auth" in m["text"].lower() for m in fake.sent)
+
+
+def test_dry_run_poll_never_persists_the_consent_nag(env):
+    conn, cfg, fake = env
+    today = datetime.now(db.TZ).date()
+    db.set_state(conn, state_keys.CONSENT_EXPIRY, (today + timedelta(days=5)).isoformat())
+    conn.commit()
+    notify.run_poll(conn, cfg, as_of=today, dry_run=True)
+    assert fake.sent == [], "dry-run must not send"
+    assert db.get_state(conn, state_keys.CONSENT_WARNED_ON) is None
+
+
+# ── First dry-run poll must not alert the whole backfill (N25) ──────────────
+
+
+def test_first_dry_run_poll_does_not_alert_the_backfill(env):
+    conn, cfg, fake = env
+    for day in range(1, 6):
+        _deliveroo(conn, f"2026-07-0{day}", -20000)  # 5 over-cap charges, no watermark yet
+    fired = notify.run_poll(conn, cfg, as_of=date(2026, 7, 6), dry_run=True)
+    assert fired == 0, "a first-ever dry-run poll must not 'alert' the entire backfill"
+    assert fake.sent == []
+    assert db.get_state(conn, state_keys.ALERTS_CHECKED_THROUGH) is None
+
+
+# ── Listener resilience (N8, N9) ────────────────────────────────────────────
+
+
+def test_listen_dry_run_advances_offset_in_memory_without_persisting(env, monkeypatch):
+    """listen+dry-run must not busy-spin re-reading the same batch: the offset is
+    tracked in memory (never persisted), so the next getUpdates asks past it."""
+    conn, cfg, fake = env
+    offsets = []
+    seq = [
+        [{"update_id": 5, "message": {"chat": {"id": 777}, "from": {"id": 777}, "text": "/today"}}],
+        [],  # nothing pending now
+        _Stop(),
+    ]
+
+    def fake_get_updates(offset, timeout):
+        offsets.append(offset)
+        item = seq.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr(telegram, "get_updates", fake_get_updates)
+    with pytest.raises(_Stop):
+        commands.process_updates(conn, cfg, listen=True, dry_run=True)
+    assert offsets[:2] == [0, 6], "second poll used the in-memory-advanced offset, not 0 again"
+    assert db.get_state(conn, state_keys.TG_UPDATE_OFFSET) is None, "dry-run persists no offset"
+
+
+def test_batch_survives_a_poison_update_and_advances_past_it(env, monkeypatch):
+    """A handler fault that is NOT a NotifyError (a WAL lock, a malformed payload)
+    must not crash the batch or wedge on the poison update — advance past it."""
+    conn, cfg, fake = env
+    real = commands._handle_update
+
+    def flaky(conn_, cfg_, update, owner, as_of, dry_run):
+        if update.get("update_id") == 1:
+            raise RuntimeError("poison payload")
+        return real(conn_, cfg_, update, owner, as_of, dry_run)
+
+    monkeypatch.setattr(commands, "_handle_update", flaky)
+    monkeypatch.setattr(telegram, "get_updates", lambda o, t: [
+        {"update_id": 1, "message": {"chat": {"id": 777}, "from": {"id": 777}, "text": "/today"}},
+        {"update_id": 2, "message": {"chat": {"id": 777}, "from": {"id": 777}, "text": "/today"}},
+    ])
+    handled = commands.process_updates(conn, cfg, listen=False)  # one-shot
+    assert handled == 1, "the good update was handled; the poison one didn't crash the batch"
+    assert any(p["text"].startswith("Safe to spend") for p in fake.sent)
+    assert db.get_state(conn, state_keys.TG_UPDATE_OFFSET) == "3", "offset advanced past BOTH updates"

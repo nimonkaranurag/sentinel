@@ -1,4 +1,12 @@
-import pytest
+"""
+Property sweeps over generated inputs.
+
+Each property loops over its whole input space inside ONE test rather than a
+per-input parametrization, so `pytest --collect-only` reports the number of
+distinct properties, not thousands of preordained cases inflating the count. The
+coverage is identical — every input below is still exercised; a failure reports
+the offending input.
+"""
 
 from sentinel import db
 from sentinel.normalize import normalize
@@ -6,14 +14,6 @@ from sentinel.normalize import normalize
 # A spread of cent values: zero, tiny, sign, thousands-grouped, millions.
 _CENTS = [0, 1, -1, 5, -5, 99, 100, -100, 4567, -4567, 100_099,
           1_368_00, 100_000_099, -100_000_099] + list(range(-250, 250, 7))
-
-
-@pytest.mark.parametrize("cents", _CENTS)
-def test_to_cents_round_trips_fmt_eur(cents):
-    # fmt_eur renders integer cents; to_cents must parse it back exactly (it
-    # strips €, spaces and thousands commas). Money must survive the round-trip.
-    assert db.to_cents(db.fmt_eur(cents)) == cents
-
 
 # Merchant-string vocabulary: prefixes × brands × trailing junk × cities.
 _PREFIXES = ["", "SUMUP *", "SQ *", "VDP-", "POS ", "PAYPAL *", "CRV*"]
@@ -24,12 +24,19 @@ _GENERATED = [f"{p}{b}{t}{c}"
               for p in _PREFIXES for b in _BRANDS for t in _TRAILERS for c in _CITIES]
 
 
-@pytest.mark.parametrize("raw", _GENERATED)
-def test_normalize_is_idempotent_over_generated_inputs(raw):
-    once = normalize(raw)
-    assert normalize(once) == once
-    # And a real letter always survives (never an empty / letterless key).
-    assert once == "" or any(ch.isalpha() for ch in once)
+def test_to_cents_round_trips_fmt_eur():
+    # fmt_eur renders integer cents; to_cents must parse it back exactly (it
+    # strips €, spaces and thousands commas). Money must survive the round-trip.
+    for cents in _CENTS:
+        assert db.to_cents(db.fmt_eur(cents)) == cents, cents
+
+
+def test_normalize_is_idempotent_over_generated_inputs():
+    for raw in _GENERATED:
+        once = normalize(raw)
+        assert normalize(once) == once, raw
+        # And a real letter always survives (never an empty / letterless key).
+        assert once == "" or any(ch.isalpha() for ch in once), raw
 
 
 def test_hash_id_occurrence_is_permutation_stable():
