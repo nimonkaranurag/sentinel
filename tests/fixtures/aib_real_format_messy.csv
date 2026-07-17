@@ -1,0 +1,6 @@
+Posted Account, Posted Transactions Date, Description, Debit Amount, Credit Amount,Balance,Transaction Type
+93XXXX-99999999,13/07/26,VDP-GOOGLE*GOOGLE,,0.93,,Credit
+93XXXX-99999999,13/07/26,VDP-KLINGAI.COM,7.99,,,Debit
+93XXXX-99999999,13/07/26,8.60 USD@,,0.00,,Credit
+93XXXX-99999999,notadate,BROKEN DATE ROW,5.00,,,Debit
+93XXXX-99999999,14/07/26,PENDING COFFEE,4.00,,,Pending

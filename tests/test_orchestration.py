@@ -1,0 +1,183 @@
+from datetime import date, datetime
+
+import pytest
+
+from sentinel import alerts, commands, db, notify, state_keys, telegram
+
+POLICIES = "policies:\n  - name: food-delivery\n    bucket: FoodDelivery\n    cap_monthly_cents: 15000\n"
+
+
+class FakeTG:
+    def __init__(self):
+        self.sent, self.edits = [], []
+        self._mid = 500
+
+    def __call__(self, token, method, payload):
+        if method == "sendMessage":
+            self._mid += 1
+            self.sent.append(payload)
+            return {"ok": True, "result": {"message_id": self._mid}}
+        if method in ("editMessageText", "answerCallbackQuery"):
+            self.edits.append(payload)
+            return {"ok": True, "result": {}}
+        if method == "getUpdates":
+            return {"ok": True, "result": []}
+        raise AssertionError(f"unexpected method {method}")
+
+
+@pytest.fixture()
+def env(tmp_path, monkeypatch):
+    conn = db.connect(tmp_path / "ledger.db")
+    db.init_db(conn)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "777")
+    fake = FakeTG()
+    monkeypatch.setattr(telegram, "_post_telegram", fake)
+    pol = tmp_path / "policies.yaml"
+    pol.write_text(POLICIES)
+    cfg = {"db_path": str(tmp_path / "ledger.db"),
+           "policies": {"path": str(pol)},
+           "categorize": {"merchant_map_path": str(tmp_path / "merchant_map.json"), "rules_path": None},
+           "enable_banking": {"api_daily_call_limit": 4, "first_pull_days": 90}}
+    return conn, cfg, fake
+
+
+def _deliveroo(conn, day, cents):
+    conn.execute("INSERT OR IGNORE INTO merchants (name_normalized, category, categorized_by) "
+                 "VALUES ('DELIVEROO', 'FoodDelivery', 'dict')")
+    mid = conn.execute("SELECT id FROM merchants WHERE name_normalized='DELIVEROO'").fetchone()[0]
+    db.insert_transactions(conn, [{"account_id": "a", "booking_date": day, "amount_cents": cents,
+                                   "merchant_raw": "DELIVEROO", "merchant_id": mid, "source": "api"}])
+    conn.commit()
+
+
+# ── Durable watermark ───────────────────────────────────────────────────
+
+
+def test_poll_alerts_uses_durable_watermark(env):
+    conn, cfg, fake = env
+    alerts.ensure_baseline(conn)  # no rows yet → baseline 0
+    _deliveroo(conn, "2026-07-01", -6000)
+    _deliveroo(conn, "2026-07-02", -6000)
+    _deliveroo(conn, "2026-07-03", -6000)  # €180 MTD > €150 cap → only the 3rd alerts
+    assert alerts.poll_alerts(conn, cfg, date(2026, 7, 3)) == 1
+    assert len(fake.sent) == 1
+    assert int(db.get_state(conn, state_keys.ALERTS_CHECKED_THROUGH)) > 0
+    # re-run: nothing new past the watermark → no double alert
+    assert alerts.poll_alerts(conn, cfg, date(2026, 7, 3)) == 0
+    assert len(fake.sent) == 1
+
+
+def test_watermark_loss_does_not_duplicate_the_alert(env):
+    """Even if the watermark is lost (a crash before it advanced), the per-txn
+    events guard makes the replay send nothing twice."""
+    conn, cfg, fake = env
+    alerts.ensure_baseline(conn)
+    _deliveroo(conn, "2026-07-01", -20000)  # over cap immediately
+    assert alerts.poll_alerts(conn, cfg, date(2026, 7, 1)) == 1
+    db.set_state(conn, state_keys.ALERTS_CHECKED_THROUGH, "0")  # simulate watermark loss
+    conn.commit()
+    assert alerts.poll_alerts(conn, cfg, date(2026, 7, 1)) == 0
+    assert len(fake.sent) == 1
+
+
+def test_ensure_baseline_does_not_alert_the_backfill(env):
+    conn, cfg, fake = env
+    _deliveroo(conn, "2026-07-01", -20000)  # a pre-existing over-cap charge
+    alerts.ensure_baseline(conn)  # baseline AFTER the backfill → it must not alert
+    assert alerts.poll_alerts(conn, cfg, date(2026, 7, 1)) == 0
+    assert fake.sent == []
+
+
+# ── Dry-run is read-only ───────────────────────────────────────────────
+
+
+def test_run_poll_dry_run_sends_nothing_and_advances_no_watermark(env):
+    conn, cfg, fake = env
+    _deliveroo(conn, "2026-07-01", -20000)
+    notify.run_poll(conn, cfg, as_of=date(2026, 7, 1), dry_run=True)
+    assert fake.sent == [], "dry-run must not send"
+    assert db.get_state(conn, state_keys.ALERTS_CHECKED_THROUGH) is None, "dry-run must not touch state"
+
+
+# ── Attended /sync alerts too ───────────────────────────────────────────
+
+
+def test_sync_categorizes_and_alerts(env, monkeypatch, tmp_path):
+    conn, cfg, fake = env
+    key = tmp_path / "key.pem"
+    key.write_text("x")
+    monkeypatch.setenv("ENABLE_BANKING_APP_ID", "app")
+    monkeypatch.setenv("ENABLE_BANKING_PRIVATE_KEY_PATH", str(key))
+    db.set_state(conn, state_keys.EB_ACCOUNT_UIDS, '["a"]')
+    conn.commit()
+    today = datetime.now(db.TZ).date()  # a charge "now" is always in the current policy month
+
+    def fake_run_ingest(conn_, client, uids, **kw):
+        _deliveroo(conn_, today.isoformat(), -20000)  # over-cap
+        return 1, 1
+
+    monkeypatch.setattr(commands.ingest, "run_ingest", fake_run_ingest)
+    monkeypatch.setattr(commands.ingest, "build_client", lambda *a, **k: object())
+    reply = commands.do_sync(conn, cfg)
+    assert "1 alert" in reply and "attended" in reply
+    assert len(fake.sent) == 1
+
+
+def test_sync_is_allowance_exempt(env, monkeypatch, tmp_path):
+    """/sync is attended (PSU headers) → it must NOT consume the unattended
+    daily allowance, even when the allowance is already spent."""
+    conn, cfg, fake = env
+    key = tmp_path / "key.pem"
+    key.write_text("x")
+    monkeypatch.setenv("ENABLE_BANKING_APP_ID", "app")
+    monkeypatch.setenv("ENABLE_BANKING_PRIVATE_KEY_PATH", str(key))
+    db.set_state(conn, state_keys.EB_ACCOUNT_UIDS, '["a"]')
+    today = datetime.now(db.TZ).date().isoformat()
+    db.set_state(conn, state_keys.api_calls(today), "4")  # allowance fully spent
+    conn.commit()
+    monkeypatch.setattr(commands.ingest, "run_ingest", lambda *a, **k: (0, 0))
+    monkeypatch.setattr(commands.ingest, "build_client", lambda *a, **k: object())
+    commands.do_sync(conn, cfg)
+    assert db.get_state(conn, state_keys.api_calls(today)) == "4", "attended /sync must not consume allowance"
+
+
+# ── Listen-loop resilience ─────────────────────────────────────────────
+
+
+class _Stop(Exception):
+    pass
+
+
+def test_listen_loop_backs_off_and_recovers_from_transient_error(env, monkeypatch):
+    conn, cfg, fake = env
+    monkeypatch.setattr(commands.time, "sleep", lambda s: None)  # don't actually sleep
+    seq = [
+        telegram.NotifyError("502 from a flaky proxy"),
+        [{"update_id": 1, "message": {"chat": {"id": 777}, "from": {"id": 777}, "text": "/today"}}],
+        _Stop(),  # break out of the otherwise-infinite listen loop
+    ]
+
+    def fake_get_updates(offset, timeout):
+        item = seq.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr(telegram, "get_updates", fake_get_updates)
+    with pytest.raises(_Stop):
+        commands.process_updates(conn, cfg, listen=True)
+    # despite the first 502, the /today command was handled after the backoff
+    assert any(p["text"].startswith("Safe to spend") for p in fake.sent)
+
+
+def test_post_telegram_non_json_reply_is_notifyerror(monkeypatch):
+    class FakeResp:
+        status_code = 502
+
+        def json(self):
+            raise ValueError("Expecting value")  # HTML error page, not JSON
+
+    monkeypatch.setattr(telegram.requests, "post", lambda *a, **k: FakeResp())
+    with pytest.raises(telegram.NotifyError, match="non-JSON"):
+        telegram._post_telegram("secret-token", "getUpdates", {})
