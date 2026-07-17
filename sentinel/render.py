@@ -1,10 +1,11 @@
 """
-Pure rendering for the Telegram surface (SPEC §4/§7).
+Read-only rendering for the Telegram surface (SPEC §4/§7).
 
-Every function turns ledger and config data into a string or a keyboard dict.
-There is no network, transport, or state mutation here; those live in
-commands.py, notify.py, and alerts.py. Keeping rendering pure lets the digest
-test assert, against a plain string, that no account id can reach the push.
+Every function turns ledger and config data into a string or a keyboard dict. It
+reads the ledger but performs no writes, no network, and no state mutation; those
+live in commands.py, notify.py, and alerts.py. Keeping this layer side-effect
+free lets the digest test assert, against a plain string, that no account id can
+reach the push.
 """
 
 from __future__ import annotations
@@ -12,8 +13,9 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
-from . import bills, categorize, controller
+from . import bills, categorize, controller, db
 from .db import fmt_eur
+from .normalize import display_merchant
 
 HELP_TEXT = (
     "Sentinel commands:\n"
@@ -59,8 +61,12 @@ def status_text(conn, cfg: dict[str, Any], as_of: date) -> str:
                  f"{fmt_eur(s['pool_cents'])} pool")
     if s.get("unlabeled_inflow_count"):
         lines.append(f"⚠️ {fmt_eur(s['unlabeled_inflow_cents'])} unlabeled inflow "
-                     f"({s['unlabeled_inflow_count']}) — excluded from the pool; "
-                     f"/recat it to Income/Transfers if it's a transfer.")
+                     f"({s['unlabeled_inflow_count']}) — held out of the pool; /recat it to "
+                     f"Income/Transfers if a transfer, or to its merchant category if a refund.")
+    quarantined = db.quarantine_count(conn)
+    if quarantined:
+        lines.append(f"⚠️ {quarantined} row(s) quarantined (non-EUR or sign-ambiguous) — "
+                     f"not counted in any total; see the ingest log.")
     lines.append(compose_daily(conn, cfg, as_of))
     return "\n".join(lines)
 
@@ -93,7 +99,7 @@ def cat_text(conn, cfg: dict[str, Any], name: str, as_of: date) -> str:
         (cat, month_start.isoformat(), as_of.isoformat()),
     ).fetchone()[0]
     lines = [f"{cat} ({categorize.bucket(cat)}): {fmt_eur(total)} this month"]
-    lines += [f"{r['id'][:8]} · {r['booking_date']} · {r['merchant_raw'] or '—'} · "
+    lines += [f"{r['id'][:8]} · {r['booking_date']} · {display_merchant(r['merchant_raw']) or '—'} · "
               f"{fmt_eur(-r['amount_cents'])}" for r in rows]
     lines.append("(use the 8-char ref with /recat or /date)" if rows else "No transactions this month.")
     return "\n".join(lines)
@@ -188,7 +194,7 @@ def render_digest(aggregates: dict[str, Any], extras: list[str]) -> str:
             lines.append(f"  {b}: {'+' if d > 0 else '−'}{fmt_eur(abs(d))}")
     if aggregates["top_3_largest_spends"]:
         lines.append("Top spends:")
-        lines += [f"  {fmt_eur(s['amount_cents'])} · {s['merchant']} ({s['category']})"
+        lines += [f"  {fmt_eur(s['amount_cents'])} · {display_merchant(s['merchant']) or '—'} ({s['category']})"
                   for s in aggregates["top_3_largest_spends"]]
     lines.append(f"Safe to spend today: {fmt_eur(aggregates['safe_to_spend_today_cents'])}")
     if extras:

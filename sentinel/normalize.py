@@ -43,6 +43,29 @@ CITY_SUFFIXES = frozenset({
 _HAS_LETTER = re.compile(r"[A-Z]")
 
 
+def _strip_enrichment_blob(name: str) -> str:
+    """
+    Cut the Enable Banking / AIB enrichment blob, e.g. "NETFLIX.COM {
+    TRANSACTIONSUBTYPE : PURCHASE, ... PAYMENTINITIATIONDATETIME :
+    2026-05-15T23:37:13+01:00, ... }". Its embedded per-transaction timestamp
+    makes every charge look like a distinct merchant — defeating dedup, the
+    recurring detector, and any human reading the name — so drop everything from
+    the first brace.
+    """
+    return name.split("{", 1)[0].strip()
+
+
+def display_merchant(merchant_raw: str | None) -> str:
+    """
+    A human-facing merchant label: the raw name with the enrichment blob removed.
+
+    Unlike normalize(), this preserves case and store/city tokens; it is the one
+    seam every outbound surface (alerts, digest, /cat) uses so no push ever leaks
+    the raw {…} blob.
+    """
+    return _strip_enrichment_blob(merchant_raw) if merchant_raw else ""
+
+
 def normalize(merchant_raw: str | None) -> str:
     """
     Normalize a raw merchant string to its canonical lookup key.
@@ -51,12 +74,7 @@ def normalize(merchant_raw: str | None) -> str:
         return ""
     collapsed = " ".join(merchant_raw.upper().split())
 
-    # Enable Banking / AIB staple an enrichment blob onto the name, e.g.
-    # "NETFLIX.COM { TRANSACTIONSUBTYPE : PURCHASE, ... PAYMENTINITIATIONDATETIME
-    # : 2026-05-15T23:37:13+01:00, ... }". The embedded per-transaction timestamp
-    # makes every charge look like a distinct merchant — defeating dedup AND the
-    # recurring detector — so cut everything from the first brace.
-    before_blob = collapsed.split("{", 1)[0].strip()
+    before_blob = _strip_enrichment_blob(collapsed)
     if before_blob:
         collapsed = before_blob
 

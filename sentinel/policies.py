@@ -24,7 +24,7 @@ import yaml
 
 from . import db
 from .categorize import BUCKETS, TAXONOMY, bucket
-from .normalize import normalize
+from .normalize import display_merchant, normalize
 
 log = logging.getLogger(__name__)
 
@@ -82,7 +82,7 @@ def _ordinal(n: int) -> str:
 def alert_text(policy: dict[str, Any], txn, mtd_cents: int, count: int) -> str:
     cap = int(policy["cap_monthly_cents"])
     icon = "🔴" if mtd_cents > cap else "⚠️"
-    merchant = (txn["merchant_raw"] or policy["name"]).split("{", 1)[0].strip()
+    merchant = display_merchant(txn["merchant_raw"]) or policy["name"]
     return (f"{icon} {merchant} {db.fmt_eur(-txn['amount_cents'])} — {_ordinal(count)} this month. "
             f"{db.fmt_eur(mtd_cents)} of your {db.fmt_eur(cap)} {policy['name']} cap. "
             f"{db.fmt_eur(mtd_cents * 12)}/yr at this pace.")
