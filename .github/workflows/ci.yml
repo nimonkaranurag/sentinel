@@ -25,7 +25,14 @@ jobs:
         run: uv run mypy sentinel
       - name: tests + coverage (gated at 80%)
         run: uv run pytest -q --cov=sentinel --cov-report=term-missing --cov-fail-under=80
-      - name: secret scan (gitleaks)
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7  # v2.3.9
+      # gitleaks-action scans the push range `<base>^..<head>`, but a repo's root
+      # commit has no `<base>^`, so the initial push fails with "unknown revision".
+      # Run the pinned binary directly instead: `detect` scans the full history
+      # from the root, so it is correct on the first push and every push after.
+      - name: secret scan (gitleaks, full history)
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: "8.24.3"
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /tmp gitleaks
+          /tmp/gitleaks detect --source . --redact --exit-code 2 -v

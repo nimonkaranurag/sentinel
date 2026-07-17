@@ -1,100 +1,242 @@
-# Sentinel
+<div align="center">
+<img src="assets/hero.png" alt="Sentinel" width="480">
+<h1>SENTINEL</h1>
+<p><em>Personal finance observability &amp; control over Telegram &mdash; local, deterministic, no&nbsp;LLM.</em></p>
+<p>
+<a href="https://github.com/nimonkaranurag/sentinel/actions/workflows/ci.yml"><img src="https://github.com/nimonkaranurag/sentinel/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+<a href=".python-version"><img src="https://img.shields.io/badge/python-3.12-3776AB?logo=python&amp;logoColor=white" alt="Python 3.12"></a>
+<a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Ruff"></a>
+<a href="https://mypy-lang.org/"><img src="https://img.shields.io/badge/types-mypy-2A6DB2" alt="Types: mypy"></a>
+<a href=".github/workflows/ci.yml"><img src="https://img.shields.io/badge/coverage-%E2%89%A580%25-brightgreen" alt="Coverage &#8805;80%"></a>
+</p>
+</div>
 
-Real-time-ish **spending discipline over Telegram** for one person's own bank
-account. It watches new transactions as they book, alerts when a spending policy
-is breached, lets you re-label a charge in two taps, and tracks recurring bills.
-Everything runs **locally** — no LLM, no third-party AI. `SPEC.md` is the source
-of truth.
+Personal, single-user finance observability and control, delivered over Telegram.
+Sentinel ingests one person's own bank transactions into a local SQLite ledger,
+categorizes them deterministically, and enforces spending discipline through cap
+alerts, a daily safe-to-spend number, and recurring-bill tracking. It runs
+locally, uses **no LLM or third-party AI**, is **read-only** (it never moves
+money), and holds money as **integer cents** end to end. [`SPEC.md`](SPEC.md) is
+the source of truth.
 
-## What it does (the five features)
+## Contents
 
-1. **Policy alerts** (`policies.py` + `alerts.py`) — each new charge is checked
-   against `policies.yaml`; a match over its monthly cap fires escalating,
-   templated copy: `🔴 Deliveroo €24.90 — 9th this month. €231.00 of your €150.00
-   food-delivery cap. €2,772.00/yr at this pace.` A durable watermark in `state`
-   means a crash between ingest and send replays, never silently drops, the batch.
-2. **Two-tap relabel** (`commands.py`) — every alert carries `[✓ fine]
-   [Reclassify…]` inline buttons. Reclassifying writes a `category_override` +
-   teaches the merchant map, recomputes, and edits the message in place. Backed
-   by an append-only `events` table and `processed_callbacks`: at-least-once
-   delivery with idempotent effects (a retried tap changes nothing twice).
-3. **Bills checklist** (`bills.py`) — a registry of expected recurring charges;
-   alerts on **late** (past the due date + grace → bounced direct debit) and
-   **drift** (amount outside tolerance → quiet price hike). Lateness is measured
-   against a real due date that rolls across month boundaries, so end-of-month
-   bills are detectable. Rendered in the weekly report.
-4. **Safe-to-spend** (`controller.py`) — one daily number: `(discretionary pool
-   − month-to-date discretionary spend) ÷ days left`. Small refunds net against
-   spend; a large unlabeled inflow (an unmapped transfer) is held out of the pool
-   until you label it, so it can't inflate the number.
-5. **Weekly report + daily push** (`notify.py`) — the 08:00 safe-to-spend push,
-   a Monday plan, and a deterministic Sunday digest (week vs prior, top spends,
-   surplus line, bills checklist). Monthly `EXPENSE_REPORT.md` via `reports.py`.
+- [Overview](#overview)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Requirements](#requirements)
+- [Setup](#setup)
+- [Configuration](#configuration)
+- [Usage](#usage)
+- [Testing and quality](#testing-and-quality)
+- [Security and privacy](#security-and-privacy)
+- [License and use](#license-and-use)
 
-## Pipeline
+## Overview
 
+Transactions arrive two ways: continuously from the [Enable Banking](https://enablebanking.com)
+API (PSD2 Account Information Services, read-only), and as a one-time 12-month
+backfill from AIB CSV exports. Each new charge is normalized, categorized against
+a learned merchant map and regex rules, and checked against spending policies.
+Breaches, relabel prompts, and the daily number are pushed to a private Telegram
+chat. Everything downstream of ingest is deterministic arithmetic and templates.
+
+Categorization is a two-tier partition: fine **sub-labels** (Dining, Coffee/Snacks,
+Subscriptions, …) roll up into six **buckets** — `Income`, `Transfers`, `Fixed`,
+`Groceries`, `FoodDelivery`, `Other` — used for all money math. A never-seen
+merchant stays `Uncategorized` (counted in the discretionary pool) until it is
+labeled through the relabel loop or `rules.local.yaml`.
+
+## Features
+
+1. **Policy alerts** (`policies.py`, `alerts.py`) — each new charge is checked
+   against `policies.yaml`; a match over its monthly cap emits escalating,
+   template-generated copy:
+
+   > 🔴 Deliveroo €24.90 — 9th this month. €231.00 of your €150.00 food-delivery
+   > cap. €2,772.00/yr at this pace.
+
+   A durable watermark in the `state` table means a crash between ingest and send
+   replays the batch on the next poll rather than silently dropping it.
+
+2. **Two-tap relabel** (`commands.py`) — every alert carries `[✓ fine]`
+   `[Reclassify…]` inline buttons. Reclassifying writes a `category_override`,
+   teaches the merchant map, recomputes, and edits the message in place. Backed by
+   an append-only `events` table and `processed_callbacks`: at-least-once delivery
+   with idempotent effects, so a retried tap never changes anything twice.
+
+3. **Bills checklist** (`bills.py`) — a registry of expected recurring charges.
+   Alerts fire on **late** (past the due date plus grace, catching a bounced
+   direct debit) and **drift** (amount outside tolerance, catching a quiet price
+   change). Lateness is measured against a real due date that rolls across month
+   boundaries, so end-of-month bills are detectable.
+
+4. **Safe-to-spend** (`controller.py`) — one daily number:
+   `(discretionary pool − month-to-date discretionary spend) ÷ days remaining`.
+   Small refunds net against spend; a large unlabeled inflow (an unmapped
+   transfer) is held out of the pool until labeled, so it cannot inflate the
+   figure.
+
+5. **Reports and pushes** (`notify.py`, `reports.py`) — the 08:00 safe-to-spend
+   push, a Monday plan, and a deterministic Sunday digest (this week versus prior,
+   top spends, surplus line, bills checklist), plus a monthly `EXPENSE_REPORT.md`
+   with charts and a gap-reconciliation residual gate.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    AUTH["authorize<br/>one-time consent"] -.->|consent| EB["Enable Banking API"]
+    CSV["AIB CSV backfill"] --> ING["ingest"]
+    EB --> ING
+    ING --> DB[("ledger.db<br/>SQLite, integer cents, idempotent")]
+    DB --> NORM["normalize"] --> CAT["categorize<br/>merchant map + regex rules, no LLM"] --> POL["policies"]
+    POL --> TG["Telegram<br/>alerts, relabel, bills"]
 ```
-Enable Banking API ─┐
-AIB CSV (fallback) ─┼─► ingest / csv_import ─► ledger.db ─► normalize → categorize ─► policies ─► telegram
-authorize (1-time consent) ┘            (money core: STRICT, integer cents, idempotent)  (alerts + relabel + bills)
-```
 
-The Telegram surface is split by responsibility: `telegram.py` (transport +
-token redaction), `render.py` (pure text/keyboards), `alerts.py` (policy
-alerts), `commands.py` (command + callback router), `notify.py` (the cron
-orchestration + CLI).
+The money core (`db.py`) parses to integer cents, refuses floats, assigns
+deterministic ids for cross-source dedupe, and enforces integer amounts at the
+STRICT-table boundary. The Telegram surface is split by responsibility so the
+pure-rendering layer can be tested in isolation:
 
-**Categorization** is a two-tier partition: fine **sub-labels** (Dining,
-Coffee/Snacks, …) roll up into 6 **buckets** (`Income · Transfers · Fixed ·
-Groceries · FoodDelivery · Other`) used for all money math. No LLM — a never-seen
-merchant stays Uncategorized (the discretionary pool) until you label it via the
-relabel loop or `rules.local.yaml`.
+| Module | Responsibility |
+| --- | --- |
+| `telegram.py` | Bot API transport — the single HTTP seam, with token redaction |
+| `render.py` | Pure text and keyboard rendering (no I/O, no state) |
+| `alerts.py` | Policy-alert engine with the durable watermark |
+| `commands.py` | Owner-only command and callback router |
+| `notify.py` | Cron orchestration and CLI entry point |
+
+## Requirements
+
+- **Python 3.12** (pinned in [`.python-version`](.python-version))
+- **[uv](https://docs.astral.sh/uv/)** for dependency management and running
+- **openssl** on `PATH` — signs the RS256 JWT, so no crypto package is needed
+- An **Enable Banking application** (app id and RS256 private key) for API access
+- A **Telegram bot** (via [@BotFather](https://t.me/BotFather)) and your chat id
+
+Runtime dependencies are `requests`, `matplotlib`, `python-dotenv`, and `PyYAML`;
+development adds `pytest`, `pytest-cov`, `ruff`, and `mypy`. All are installed by
+`uv sync --dev`.
 
 ## Setup
 
-1. **Install the git hook (once):** `make hooks` symlinks `scripts/pre-commit`
-   into `.git/hooks`, then `cp .pii-patterns.example .pii-patterns` and fill in
-   your own identifiers (that file is git-ignored — never commit it).
-2. **Access (one-time):** `python -m sentinel.authorize` completes the Enable
-   Banking consent handshake and writes the account uids to `state` (re-run for
-   the ≤180-day re-auth). See `docs/RAILS.md`.
-3. **Secrets** live in `.env` (git-ignored): `ENABLE_BANKING_APP_ID`,
-   `ENABLE_BANKING_PRIVATE_KEY_PATH` (path only), `TELEGRAM_BOT_TOKEN`,
-   `TELEGRAM_CHAT_ID`. Copy `.env.example`.
-4. **Owner-specific config** goes in git-ignored local files: `rules.local.yaml`
-   (employer/landlord/family patterns → categories) and `bills.local.yaml`
-   (your recurring bills). Tunables — the discretionary `pool_monthly_cents`,
-   policy caps, thresholds, the unlabeled-inflow threshold — live in
-   `config.yaml` / `policies.yaml`.
+```sh
+uv sync --dev                 # install dependencies into .venv
+make hooks                    # symlink the pre-commit secret/PII hook
+cp .pii-patterns.example .pii-patterns   # then fill in your own identifiers
+cp .env.example .env          # then fill in secrets (see below)
+make init                     # create data/reports/backups dirs, init the schema
+```
 
-## Make targets
+1. **Secrets** live in `.env` (git-ignored): `ENABLE_BANKING_APP_ID`,
+   `ENABLE_BANKING_PRIVATE_KEY_PATH` (a path only — the key never enters the repo
+   or database), `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_CHAT_ID`.
+2. **Bank consent (one-time):** `uv run python -m sentinel.authorize` completes
+   the Enable Banking SCA handshake and writes the account uids to `state`. Re-run
+   it for the ≤180-day re-authorization.
+3. **Owner-specific config** goes in git-ignored local files: `rules.local.yaml`
+   (employer, landlord, and family patterns → categories) and `bills.local.yaml`
+   (your recurring bills). These merge ahead of the committed seed files.
+4. **Backfill (optional):** drop AIB CSV exports into `data/backfill/` and run
+   `make backfill`; imports are clipped to the API's coverage window so the
+   overlap cannot be double-counted.
 
-`make init` · `hooks` · `backfill` · `categorize` (`relink` after a normalizer
-change) · `report` · **`poll`** (ingest + categorize + policy alerts — the cron
-path) · `notify` (daily push + commands) · **`plan`** (Monday) · `digest`
-(weekly) · `backup` (safe `sqlite .backup`, never `cp` a live WAL DB) · `test`.
-There is deliberately no alert-less `ingest` target — `poll` is the one ingest
-path so a charge can't book without being checked.
+The optional hard-rails funding runbook is in [`docs/RAILS.md`](docs/RAILS.md).
 
-## Commands (Telegram, owner chat only)
+## Configuration
 
-`/today` `/status` `/cat <name>` `/sync` `/recat <ref> <category>` `/date <ref>`,
-plus the inline-keyboard relabel flow on every alert. Every command and tap is
-authorized by the **sender's** id, not the chat id.
+Nothing tunable is hardcoded; every knob lives in configuration.
 
-## Money & safety
+| File | In git | Purpose |
+| --- | --- | --- |
+| `config.yaml` | yes | Tunables: discretionary pool, thresholds, policy caps, ingest and retry knobs |
+| `sentinel/policies.yaml` | yes | Seed spending policies (schema-checked at load) |
+| `sentinel/bills.yaml` | yes | Seed recurring bills |
+| `sentinel/rules.yaml` | yes | Seed categorization rules |
+| `.env` | no | Secrets: Enable Banking app id and key path, Telegram token and chat id |
+| `rules.local.yaml`, `bills.local.yaml` | no | Owner-specific patterns and bills, merged ahead of the seeds |
+| `.pii-patterns` | no | Pre-commit PII blocklist (the list of identifiers is itself sensitive) |
+| `merchant_map.json` | no | Learned merchant → category map, grown by the relabel loop |
 
-Integer cents everywhere (STRICT tables refuse non-integers); ingest quarantines
-malformed rows per-row (API and CSV) and rejects sign-ambiguous and non-EUR ones;
-the CSV backfill clips to the API's coverage window so the overlap can't be
-double-counted; refunds net against spend; the bot token is redacted from every
-error path (one send seam). `.env`, `ledger.db`, `merchant_map.json`,
-`rules.local.yaml`, `bills.local.yaml`, `.pii-patterns`, `CODE-REVIEW.md` are
-git-ignored, and the portable pre-commit hook (gitleaks + a grep against the
-git-ignored `.pii-patterns`) blocks secrets and PII before they enter history.
+## Usage
 
-## Quality gate
+### Make targets
 
-`ruff`, `mypy`, `pytest` (+coverage, gated at 80%), and `gitleaks` run in CI
-(`.github/workflows/ci.yml`) and locally: `uv run ruff check . && uv run mypy
-sentinel && uv run pytest -q`.
+| Target | Action |
+| --- | --- |
+| `make init` | Create the data directories and initialize the ledger schema |
+| `make hooks` | Install the pre-commit secret and PII hook |
+| `make backfill` | Import AIB CSV exports from `data/backfill/*.csv` |
+| `make categorize` | Run the categorizer cascade over pending merchants |
+| `make relink` | Rebuild merchant links after a normalizer or rule change (atomic) |
+| `make report` | Write the monthly `EXPENSE_REPORT.md` and charts |
+| `make poll` | Ingest → categorize → policy alerts (the cron path; consumes one API unit) |
+| `make notify` | Daily safe-to-spend push and answer pending commands |
+| `make plan` | Monday weekly-plan push (idempotent per ISO week) |
+| `make digest` | Sunday weekly digest |
+| `make backup` | Safe SQLite `.backup` (never a filesystem copy of a live WAL database) |
+| `make test` | Run the test suite |
+
+There is deliberately no alert-less `ingest` target: `poll` is the one ingest
+path, so a charge cannot book without being checked.
+
+### Telegram commands
+
+Authorized by the **sender's** id, not the chat id — pointing the bot at a group
+does not let other members drive the ledger.
+
+| Command | Effect |
+| --- | --- |
+| `/today` | Safe-to-spend one-liner |
+| `/status` | Month-to-date spend by bucket, plus safe-to-spend |
+| `/cat <name>` | A category and this month's transactions (with refs) |
+| `/sync` | Attended bank pull (exempt from the daily unattended allowance) |
+| `/recat <ref> <category>` | Recategorize a transaction and teach its merchant |
+| `/date <ref>` | Mark one transaction as `Dates`, leaving the merchant untouched |
+
+The inline `[✓ fine]` `[Reclassify…]` keyboard accompanies every alert.
+
+### Scheduling
+
+[`deploy/crontab.txt`](deploy/crontab.txt) runs the scheduled jobs (Europe/Dublin):
+four unattended polls per day (07:45, 12:45, 17:45, 21:45), the 08:00 daily push,
+the Monday 08:05 plan, the Sunday 18:00 digest, and a 02:30 nightly backup. Each
+push is idempotent per period, so a re-run cron cannot double-send.
+
+## Testing and quality
+
+```sh
+uv run ruff check .
+uv run mypy sentinel
+uv run pytest -q --cov=sentinel --cov-report=term-missing --cov-fail-under=80
+```
+
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the same lint,
+type, and test steps — coverage gated at 80% — plus a `gitleaks` secret scan over
+full history. Third-party actions are pinned to commit SHAs. Every correctness
+claim in `SPEC.md` (dedupe, the residual gate, cross-month bill lateness, the
+alert watermark, sender-id authorization) is pinned by a test.
+
+## Security and privacy
+
+- **No payment initiation, ever.** Sentinel consumes read-only Account
+  Information Services and cannot move money. It never stores bank credentials;
+  access is a short-lived, locally signed JWT.
+- **Money integrity.** Integer cents throughout, with STRICT tables refusing
+  non-integers. Ingest quarantines malformed rows per row and rejects
+  sign-ambiguous and non-EUR entries; the CSV backfill clips to the API window to
+  avoid double-counting.
+- **Secrets and PII stay out of git.** `.env`, `ledger.db`, `merchant_map.json`,
+  `rules.local.yaml`, `bills.local.yaml`, and `.pii-patterns` are git-ignored. The
+  portable pre-commit hook (gitleaks, generic secret shapes, and a grep against
+  the git-ignored `.pii-patterns`) blocks secrets and PII before they enter
+  history. The bot token is redacted from every error path.
+
+See [`docs/PRIVACY.md`](docs/PRIVACY.md) for the full data-handling policy.
+
+## License and use
+
+A personal, non-commercial project, provided as-is without warranty and not
+offered as a service to third parties. See [`docs/TERMS.md`](docs/TERMS.md) and
+[`docs/PRIVACY.md`](docs/PRIVACY.md).
