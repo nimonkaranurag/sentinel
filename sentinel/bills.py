@@ -30,6 +30,7 @@ from typing import Any
 
 import yaml
 
+from . import db, state_keys, telegram
 from .db import fmt_eur
 
 log = logging.getLogger(__name__)
@@ -38,9 +39,14 @@ DEFAULT_BILLS_PATH = Path(__file__).resolve().parent / "bills.yaml"
 _REQUIRED = ("name", "pattern", "due_day", "expected_cents", "tolerance_pct")
 
 # A direct debit can post a few days before its nominal due day; a charge in
-# [due − EARLY_MATCH_DAYS, as_of] counts as paying the current cycle. Kept well
+# [due − early_match_days, as_of] counts as paying the current cycle. Kept well
 # under a monthly period so a *previous* cycle's payment can't leak into it.
-EARLY_MATCH_DAYS = 5
+# Config overrides via bills.early_match_days (config.yaml).
+DEFAULT_EARLY_MATCH_DAYS = 5
+
+
+def _early_match_days(cfg: dict[str, Any]) -> int:
+    return int((cfg.get("bills") or {}).get("early_match_days", DEFAULT_EARLY_MATCH_DAYS))
 
 
 def load_bills(path: str | Path | None = None) -> tuple[list[dict[str, Any]], int]:
@@ -122,11 +128,11 @@ def current_due(as_of: date, due_day: int) -> date:
     return _clamped_due(year, month, due_day)
 
 
-def _cycle_match(conn, bill: dict[str, Any], due: date, as_of: date):
+def _cycle_match(conn, bill: dict[str, Any], due: date, as_of: date, early_days: int):
     """
     Return the most recent matching charge in the current cycle window, or None.
     """
-    start = (due - timedelta(days=EARLY_MATCH_DAYS)).isoformat()
+    start = (due - timedelta(days=early_days)).isoformat()
     for row in conn.execute(
         "SELECT booking_date, merchant_raw, amount_cents FROM transactions "
         "WHERE amount_cents < 0 AND booking_date >= ? AND booking_date <= ? "
@@ -140,34 +146,63 @@ def _cycle_match(conn, bill: dict[str, Any], due: date, as_of: date):
 def check(conn, cfg: dict[str, Any], as_of: date,
           path: str | Path | None = None) -> list[dict[str, Any]]:
     bills, grace = load_bills(path)
+    early = _early_match_days(cfg)
     alerts = []
     for b in bills:
         due = current_due(as_of, b["due_day"])
-        row = _cycle_match(conn, b, due, as_of)
+        row = _cycle_match(conn, b, due, as_of, early)
         if row is not None:
             amt = -row["amount_cents"]
             lo = b["expected_cents"] * (100 - b["tolerance_pct"]) // 100
             hi = b["expected_cents"] * (100 + b["tolerance_pct"]) // 100
             if not lo <= amt <= hi:
-                alerts.append({"bill": b["name"], "kind": "drift", "text":
+                alerts.append({"bill": b["name"], "kind": "drift", "due": due.isoformat(), "text":
                     f"⚠️ {b['name']} was {fmt_eur(amt)}, expected ~{fmt_eur(b['expected_cents'])} "
                     f"(±{b['tolerance_pct']}%) — price change?"})
         else:
             days_late = (as_of - due).days
             if days_late > grace:
-                alerts.append({"bill": b["name"], "kind": "late", "text":
+                alerts.append({"bill": b["name"], "kind": "late", "due": due.isoformat(), "text":
                     f"🔴 {b['name']} unpaid — {days_late} days past due ({due.isoformat()}). "
                     "Bounced direct debit?"})
     return alerts
 
 
+def send_alerts(conn, cfg: dict[str, Any], as_of: date, dry_run: bool = False,
+                path: str | Path | None = None) -> int:
+    """
+    Fire the late/drift alerts for the current cycle through the Telegram seam,
+    idempotently. Returns the number sent.
+
+    `check()` re-returns the same alert every poll, so each is guarded by a
+    per-cycle state key: one late bill sends exactly one message per cycle, not
+    one per poll (four polls a day). The guard is written only after the send
+    succeeds, so a crashed send replays next poll.
+    """
+    path = path if path is not None else (cfg.get("bills") or {}).get("path")
+    sent = 0
+    for a in check(conn, cfg, as_of, path):
+        key = state_keys.bill_alerted(a["bill"], a["due"], a["kind"])
+        if db.get_state(conn, key) is not None:
+            continue
+        if dry_run:
+            log.info("dry-run bill alert: %s", a["text"])
+        else:
+            telegram.send_message(a["text"])
+            db.set_state(conn, key, db.now_iso())
+            conn.commit()
+        sent += 1
+    return sent
+
+
 def render_checklist(conn, cfg: dict[str, Any], as_of: date,
                      path: str | Path | None = None) -> str:
     bills, grace = load_bills(path)
+    early = _early_match_days(cfg)
     lines = ["Bills this month:"]
     for b in bills:
         due = current_due(as_of, b["due_day"])
-        row = _cycle_match(conn, b, due, as_of)
+        row = _cycle_match(conn, b, due, as_of, early)
         if row is not None:
             lines.append(f"  ✅ {b['name']} {fmt_eur(-row['amount_cents'])} "
                          f"(paid {row['booking_date']})")

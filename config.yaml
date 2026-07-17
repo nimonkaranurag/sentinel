@@ -61,6 +61,18 @@ categorize:
   merchant_map_path: merchant_map.json
   # null = bundled sentinel/rules.yaml seed rules
   rules_path: null
+  # Trailing window (days) the cascade reports categorization coverage over. The
+  # boundary is computed in Europe/Dublin, not via SQLite date('now') (UTC).
+  coverage_window_days: 90
+
+bills:
+  # A direct debit can post a few days before its nominal due day; a charge in
+  # [due − early_match_days, as_of] counts as paying the current cycle. Keep it
+  # well under a monthly period so a previous cycle's payment can't leak in — a
+  # DD that lands 6 days early would otherwise read as unpaid and false-alert LATE.
+  early_match_days: 5
+  # null = bundled sentinel/bills.yaml merged with git-ignored bills.local.yaml.
+  path: null
 
 reports:
   output_dir: reports

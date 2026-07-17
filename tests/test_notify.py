@@ -172,6 +172,59 @@ def test_date_flips_one_txn_without_touching_merchant(bot):
                         ).fetchone()["category"] == "Other"
 
 
+def test_owner_id_authorizes_independently_of_chat_id(bot, monkeypatch):
+    """Delivery goes to TELEGRAM_CHAT_ID; authority follows TELEGRAM_OWNER_ID. Point
+    the bot at a group (chat 777) but let user 555 be the owner: only 555 drives it."""
+    conn, cfg, fake = bot
+    monkeypatch.setenv("TELEGRAM_OWNER_ID", "555")
+    fake.updates = [
+        {"update_id": 21, "message": {"chat": {"id": 777}, "from": {"id": 555}, "text": "/today"}},  # owner
+        {"update_id": 22, "message": {"chat": {"id": 777}, "from": {"id": 777}, "text": "/status"}},  # not owner
+    ]
+    handled = commands.process_updates(conn, cfg, as_of=AS_OF)
+    assert handled == 1
+    assert len(fake.sent) == 1 and fake.sent[0].startswith("Safe to spend today:")
+
+
+def test_status_surfaces_quarantined_rows(bot):
+    conn, cfg, _ = bot
+    db.quarantine_row(conn, "api", "non-EUR booked currency 'USD'", {"ref": "x"}, "acc-uid-1")
+    conn.commit()
+    text = commands.handle_command(conn, cfg, "/status", AS_OF)
+    assert "1 row(s) quarantined" in text
+
+
+def test_labeled_refund_nets_but_large_unlabeled_inflow_does_not(tmp_path):
+    """N5: a €150 labeled Shopping refund nets against its purchase; a €1,000
+    Uncategorized inflow is held out of the pool and surfaced for labeling."""
+    conn = db.connect(tmp_path / "ledger.db")
+    db.init_db(conn)
+    cfg = make_cfg(tmp_path)
+    cfg["controller"]["unlabeled_inflow_exclude_cents"] = 10_000  # €100
+    base = controller.safe_to_spend(conn, cfg, date(2026, 7, 1))
+    _mk_spend(conn, "Shopping", "ZARA", [("2026-07-01", -20_000), ("2026-07-01", 15_000)])
+    after = controller.safe_to_spend(conn, cfg, date(2026, 7, 1))
+    assert base["remaining_cents"] - after["remaining_cents"] == 5_000, "refund nets (€200 − €150)"
+    assert after["by_bucket_cents"]["Other"] == 5_000  # Shopping → Other
+    assert after["unlabeled_inflow_count"] == 0, "a labeled refund is not an unlabeled inflow"
+    _mk_spend(conn, "Uncategorized", "MYSTERY", [("2026-07-01", 100_000)])
+    held = controller.safe_to_spend(conn, cfg, date(2026, 7, 1))
+    assert held["remaining_cents"] == after["remaining_cents"], "big unlabeled inflow excluded"
+    assert held["unlabeled_inflow_count"] == 1 and held["unlabeled_inflow_cents"] == 100_000
+    conn.close()
+
+
+def test_month_surplus_nets_a_labeled_refund(tmp_path):
+    conn = db.connect(tmp_path / "ledger.db")
+    db.init_db(conn)
+    _mk_spend(conn, "Income", "SALARY", [("2026-06-01", 300_000)])
+    _mk_spend(conn, "Shopping", "ZARA", [("2026-06-10", -20_000), ("2026-06-12", 15_000)])
+    s = controller.month_surplus(conn, "2026-06", 10_000)
+    assert s["spend_cents"] == 5_000, "the €150 refund nets against the €200 purchase"
+    assert s["surplus_cents"] == 300_000 - 5_000
+    conn.close()
+
+
 def test_process_updates_only_honors_owner_sender(bot):
     """Authorize by the SENDER's id, not the chat id: a stranger who is a member
     of the owner's chat/group must be rejected."""
