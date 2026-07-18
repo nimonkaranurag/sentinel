@@ -26,10 +26,23 @@ internet banking (T&C breach), any LLM/AI dependency, a web UI, multi-user.
 
 ## 2. Architecture
 
-```
-Enable Banking API ─┐
-AIB CSV (fallback) ─┼─► ingest / csv_import ─► ledger.db ─► normalize → categorize ─► policies ─► notify → Telegram
-authorize (1-time consent) ┘                    (money core)                  (buckets)   (alerts)  (relabel · bills · pushes)
+```mermaid
+flowchart LR
+    EB(["Enable Banking API"])
+    CSV(["AIB CSV<br/>(fallback)"])
+    AUTH["authorize<br/>(1-time consent)"]
+    ING["ingest / csv_import"]
+    DB[("ledger.db<br/>(money core)")]
+    NORM["normalize"]
+    CAT["categorize<br/>(buckets)"]
+    POL["policies<br/>(alerts)"]
+    NOT["notify<br/>(relabel · bills · pushes)"]
+    TG(["Telegram"])
+
+    EB --> ING
+    CSV --> ING
+    AUTH --> ING
+    ING --> DB --> NORM --> CAT --> POL --> NOT --> TG
 ```
 
 **Money core:** SQLite STRICT tables, integer cents everywhere (`to_cents`
