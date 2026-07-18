@@ -95,26 +95,26 @@ def _payday_line(s: dict[str, Any]) -> str:
 def compose_daily(conn, cfg: dict[str, Any], as_of: date) -> str:
     """
     Compose the /today reply and the daily 08:00 push: the headline number, a
-    plain-English pool status, and where you are in the pay cycle.
+    plain-English budget status, and where you are in the pay cycle.
     """
     s = controller.safe_to_spend(conn, cfg, as_of)
     badge = traffic_light(cfg, s["safe_today_cents"])
     remaining = s["remaining_cents"]
     if remaining >= 0:
-        pool_status = f"{fmt_eur(remaining)} left in your pool · {_payday_line(s)}"
+        budget_status = f"{fmt_eur(remaining)} left to spend · {_payday_line(s)}"
     else:
-        pool_status = f"⚠️ {fmt_eur(-remaining)} over your pool · {_payday_line(s)}"
+        budget_status = f"⚠️ {fmt_eur(-remaining)} over budget · {_payday_line(s)}"
     spent_line = (
-        f"Pool {fmt_eur(s['pool_cents'])} · {fmt_eur(s['discretionary_spent_cents'])} "
-        f"spent since {fmt_day(date.fromisoformat(s['cycle_start']))}"
+        f"Used {fmt_eur(s['discretionary_spent_cents'])} of your {fmt_eur(s['pool_cents'])} "
+        f"budget since {fmt_day(date.fromisoformat(s['cycle_start']))}"
     )
-    return f"Safe to spend today: {fmt_eur(s['safe_today_cents'])}  {badge}\n\n{pool_status}\n{spent_line}"
+    return f"Safe to spend today: {fmt_eur(s['safe_today_cents'])}  {badge}\n\n{budget_status}\n{spent_line}"
 
 
 def status_text(conn, cfg: dict[str, Any], as_of: date) -> str:
     """
-    Compose /status: the pay-cycle window, spend by bucket, the discretionary
-    pool, any holds (unlabeled inflow / quarantine), and today's number.
+    Compose /status: the pay-cycle window, spend by bucket, the spending budget,
+    any holds (unlabeled inflow / quarantine), and today's number.
     """
     s = controller.safe_to_spend(conn, cfg, as_of)
     cycle_start = date.fromisoformat(s["cycle_start"])
@@ -135,14 +135,14 @@ def status_text(conn, cfg: dict[str, Any], as_of: date) -> str:
     remaining = s["remaining_cents"]
     tail = f"{fmt_eur(remaining)} left" if remaining >= 0 else f"⚠️ {fmt_eur(-remaining)} over"
     lines.append(
-        f"Discretionary pool: {fmt_eur(s['discretionary_spent_cents'])} spent of {fmt_eur(s['pool_cents'])} — {tail}"
+        f"Spending budget: {fmt_eur(s['discretionary_spent_cents'])} used of {fmt_eur(s['pool_cents'])} — {tail}"
     )
 
     if s.get("unlabeled_inflow_count"):
         lines += [
             "",
             f"⚠️ {fmt_eur(s['unlabeled_inflow_cents'])} unlabeled inflow "
-            f"({s['unlabeled_inflow_count']}) is held out of the pool.",
+            f"({s['unlabeled_inflow_count']}) — not counted in your budget yet.",
             "   /recat it to Income/Transfers, or to its merchant category if it's a refund.",
         ]
     quarantined = db.quarantine_count(conn)
@@ -229,15 +229,14 @@ def reclass_keyboard(ref: str) -> dict[str, Any]:
 
 def compose_weekly_plan(conn, cfg: dict[str, Any], as_of: date) -> str:
     """
-    Compose the Monday plan: this week's slice of the remaining discretionary
-    pool.
+    Compose the Monday plan: this week's slice of the remaining spending budget.
     """
     s = controller.safe_to_spend(conn, cfg, as_of)
     weeks_left = max(1, (s["days_left"] + 6) // 7)
     week_budget = max(0, s["remaining_cents"] // weeks_left)
     return (
-        f"🗓️ This week: {fmt_eur(week_budget)} discretionary "
-        f"({fmt_eur(s['remaining_cents'])} of your pool left, {s['days_left']} days)."
+        f"🗓️ This week you can spend {fmt_eur(week_budget)} "
+        f"({fmt_eur(s['remaining_cents'])} of your budget left, {s['days_left']} days to payday)."
     )
 
 
