@@ -211,8 +211,8 @@ def test_status_surfaces_quarantined_rows(bot):
     conn, cfg, _ = bot
     db.quarantine_row(conn, "api", "non-EUR booked currency 'USD'", {"ref": "x"}, "acc-uid-1")
     conn.commit()
-    text = commands.handle_command(conn, cfg, "/status", AS_OF)
-    assert "1 row quarantined" in text
+    reply = commands.handle_command(conn, cfg, "/status", AS_OF)
+    assert "1 row quarantined" in reply.text
 
 
 def test_labeled_refund_nets_but_large_unlabeled_inflow_does_not(tmp_path):
@@ -309,9 +309,26 @@ def test_set_my_commands_registers_via_transport(monkeypatch):
 
 def test_cat_shows_refs(bot):
     conn, cfg, _ = bot
-    text = commands.handle_command(conn, cfg, "/cat coffee/snacks", AS_OF)
-    assert "Coffee/Snacks" in text
-    assert re.search(r"\b[0-9a-f]{8} · 2026-07-\d{2} · COFFEE ANGEL · €3\.50", text)
+    reply = commands.handle_command(conn, cfg, "/cat coffee/snacks", AS_OF)
+    assert reply.parse_mode == "HTML"  # rendered as a monospace table
+    assert "Coffee/Snacks" in reply.text
+    assert re.search(r"[0-9a-f]{8}", reply.text)  # an 8-char ref for /recat
+    assert "COFFEE ANGEL" in reply.text and "€3.50" in reply.text
+
+
+def test_cat_no_arg_and_unknown_offer_a_button_picker(bot):
+    conn, cfg, _ = bot
+    for text in ("/cat", "/cat nonsense"):
+        reply = commands.handle_command(conn, cfg, text, AS_OF)
+        buttons = [b for row in reply.reply_markup["inline_keyboard"] for b in row]
+        assert any(b["callback_data"] == "cat:Dining" for b in buttons), text
+
+
+def test_cat_bucket_name_drills_into_the_rollup(bot):
+    """/cat misc (the Other rollup shown in /status) lists its sub-labels, not 0.00."""
+    conn, cfg, _ = bot
+    reply = commands.handle_command(conn, cfg, "/cat misc", AS_OF)
+    assert reply.parse_mode == "HTML" and "Misc." in reply.text
 
 
 def test_sync_replies_when_unconfigured_and_is_allowance_exempt(bot, monkeypatch, tmp_path):

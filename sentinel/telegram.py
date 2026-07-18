@@ -95,15 +95,26 @@ def post(method: str, payload: dict[str, Any]) -> dict[str, Any]:
     return _post_telegram(token, method, payload)
 
 
-def send_message(text: str) -> None:
+def send_message(text: str, parse_mode: str | None = None, reply_markup: dict[str, Any] | None = None) -> None:
     token, chat_id = credentials()
-    for start in range(0, len(text), MAX_MESSAGE_CHARS):
-        _post_telegram(token, "sendMessage", {"chat_id": chat_id, "text": text[start : start + MAX_MESSAGE_CHARS]})
+    chunks = [text[i : i + MAX_MESSAGE_CHARS] for i in range(0, len(text), MAX_MESSAGE_CHARS)] or [""]
+    for i, chunk in enumerate(chunks):
+        payload: dict[str, Any] = {"chat_id": chat_id, "text": chunk}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        # The keyboard attaches to the last chunk only (Telegram shows one per message).
+        if reply_markup is not None and i == len(chunks) - 1:
+            payload["reply_markup"] = reply_markup
+        _post_telegram(token, "sendMessage", payload)
 
 
-def edit_message(message_id: Any, text: str, reply_markup: dict[str, Any] | None = None) -> None:
+def edit_message(
+    message_id: Any, text: str, reply_markup: dict[str, Any] | None = None, parse_mode: str | None = None
+) -> None:
     token, chat_id = credentials()
     payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "text": text}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
     _post_telegram(token, "editMessageText", payload)

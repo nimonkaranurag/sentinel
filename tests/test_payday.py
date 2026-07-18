@@ -163,9 +163,9 @@ def test_today_and_status_read_cleanly(tmp_path):
     assert "to payday" in today and "€1,200.00 budget" in today
     assert "pool" not in today.lower(), "no jargon in the bot text"
     status = render.status_text(conn, cfg, date(2026, 7, 18))
-    assert status.startswith("📊 This pay cycle")
-    assert "Groceries" in status and "Safe to spend today: €" in status
-    assert "acc-uid" not in status, "no account id can reach the chat"
+    assert status.text.startswith("📊 This pay cycle") and status.parse_mode == "HTML"
+    assert "Groceries" in status.text and "Safe to spend today: €" in status.text
+    assert "acc-uid" not in status.text, "no account id can reach the chat"
     conn.close()
 
 

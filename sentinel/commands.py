@@ -157,7 +157,7 @@ def do_sync(conn, cfg: dict[str, Any]) -> str:
         return f"⚠️ Sync failed: {exc}\nNothing was changed — try again in a minute."
 
 
-def handle_command(conn, cfg: dict[str, Any], text: str, as_of: date) -> str:
+def handle_command(conn, cfg: dict[str, Any], text: str, as_of: date) -> str | render.Reply:
     parts = text.strip().split()
     if not parts:
         return render.HELP_TEXT
@@ -171,11 +171,21 @@ def handle_command(conn, cfg: dict[str, Any], text: str, as_of: date) -> str:
     if cmd == "/status":
         return render.status_text(conn, cfg, as_of)
     if cmd == "/cat":
-        return render.cat_text(conn, cfg, " ".join(args), as_of) if args else "Usage: /cat <name>"
+        if not args:  # no name → tappable picker instead of "Usage:"
+            return render.Reply("Which category? Tap one:", reply_markup=render.category_view_keyboard())
+        return render.cat_text(conn, cfg, " ".join(args), as_of)
     if cmd == "/sync":
         return do_sync(conn, cfg)
     if cmd == "/recat":
-        return do_recat(conn, cfg, args[0], " ".join(args[1:])) if len(args) >= 2 else "Usage: /recat <ref> <category>"
+        if not args:
+            return "Usage: /recat <ref> <category> — or /recat <ref> to pick from buttons."
+        # ref only, or an unrecognised category → offer the tappable grid rather
+        # than making the owner type "Health/Fitness".
+        if len(args) == 1 or render.resolve_category(" ".join(args[1:])) is None:
+            return render.Reply(
+                f"Pick the category for {args[0][:8]}:", reply_markup=render.reclass_keyboard(args[0][:12])
+            )
+        return do_recat(conn, cfg, args[0], " ".join(args[1:]))
     if cmd == "/date":
         return do_date(conn, args[0]) if args else "Usage: /date <ref>"
     # Telegram won't register a hyphen in a BotFather command menu, so accept the
@@ -188,14 +198,14 @@ def handle_command(conn, cfg: dict[str, Any], text: str, as_of: date) -> str:
 # ── Inline-keyboard callbacks ────────────────────────────────────────────────
 
 
-def handle_callback(conn, cfg: dict[str, Any], callback: dict[str, Any]) -> None:
+def handle_callback(conn, cfg: dict[str, Any], callback: dict[str, Any], as_of: date) -> None:
     """
-    Process one inline-keyboard tap, editing the alert message in place.
+    Process one inline-keyboard tap, editing the message in place.
 
     Idempotent but not exactly-once: the dedupe marker is inserted after the
     effects, so a crash between them replays, but every effect (message edit,
     events status, do_recat) is itself idempotent, so the replay is harmless.
-    Callback data carries the exact transaction ref.
+    Callback data carries the exact transaction ref or category.
     """
     cb_id = str(callback.get("id"))
     if conn.execute("SELECT 1 FROM processed_callbacks WHERE callback_id = ?", (cb_id,)).fetchone():
@@ -213,6 +223,9 @@ def handle_callback(conn, cfg: dict[str, Any], callback: dict[str, Any]) -> None
         reply = do_recat(conn, cfg, ref, category)
         telegram.edit_message(message_id, f"Got it — {category}. {reply}")
         conn.execute("UPDATE events SET status = 'reclassified' WHERE message_id = ?", (message_id,))
+    elif action == "cat":  # a /cat picker tap → show that category's transactions
+        view = render.cat_text(conn, cfg, rest, as_of)
+        telegram.edit_message(message_id, view.text, view.reply_markup, parse_mode=view.parse_mode)
     conn.execute("INSERT INTO processed_callbacks (callback_id, processed_at) VALUES (?, ?)", (cb_id, db.now_iso()))
     conn.commit()
     telegram.answer_callback(cb_id)
@@ -234,7 +247,7 @@ def _handle_update(
             log.warning("ignoring callback from non-owner sender %s", sender or "?")
             return False
         if not dry_run:
-            handle_callback(conn, cfg, callback)
+            handle_callback(conn, cfg, callback, as_of)
         return True
     message = update.get("message") or {}
     text = message.get("text") or ""
@@ -245,10 +258,11 @@ def _handle_update(
     if not text.startswith("/"):
         return False
     reply = handle_command(conn, cfg, text, as_of)
+    r = reply if isinstance(reply, render.Reply) else render.Reply(reply)
     if dry_run:
-        log.info("dry-run reply to %r: %s", text, reply)
+        log.info("dry-run reply to %r: %s", text, r.text)
     else:
-        telegram.send_message(reply)
+        telegram.send_message(r.text, parse_mode=r.parse_mode, reply_markup=r.reply_markup)
     return True
 
 

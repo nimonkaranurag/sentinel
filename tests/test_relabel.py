@@ -1,6 +1,10 @@
+from datetime import date
+
 import pytest
 
 from sentinel import alerts, commands, db, telegram
+
+AS_OF = date(2026, 7, 15)
 
 
 class FakeTG:
@@ -67,13 +71,13 @@ def test_alert_carries_keyboard_and_records_event(env):
 def test_reclassify_round_trip_edits_and_teaches(env):
     conn, cfg, fake, tid = env
     mid = alerts.send_policy_alert(conn, {"txn_id": tid, "policy": "food-delivery", "text": "🔴 over cap"})
-    commands.handle_callback(conn, cfg, {"id": "cb1", "data": f"rc:{tid[:12]}", "message": {"message_id": mid}})
+    commands.handle_callback(conn, cfg, {"id": "cb1", "data": f"rc:{tid[:12]}", "message": {"message_id": mid}}, AS_OF)
     assert fake.edits[-1]["text"] == "Pick a category:"
     assert any(
         b["callback_data"].startswith("set:") for row in fake.edits[-1]["reply_markup"]["inline_keyboard"] for b in row
     )
     commands.handle_callback(
-        conn, cfg, {"id": "cb2", "data": f"set:{tid[:12]}:Groceries", "message": {"message_id": mid}}
+        conn, cfg, {"id": "cb2", "data": f"set:{tid[:12]}:Groceries", "message": {"message_id": mid}}, AS_OF
     )
     assert "Got it — Groceries" in fake.edits[-1]["text"]
     assert (
@@ -87,7 +91,7 @@ def test_duplicate_callback_is_exactly_once(env):
     conn, cfg, fake, tid = env
     mid = alerts.send_policy_alert(conn, {"txn_id": tid, "policy": "p", "text": "x"})
     cb = {"id": "dup", "data": f"ok:{tid[:12]}", "message": {"message_id": mid}}
-    commands.handle_callback(conn, cfg, cb)
-    commands.handle_callback(conn, cfg, cb)  # retried tap
+    commands.handle_callback(conn, cfg, cb, AS_OF)
+    commands.handle_callback(conn, cfg, cb, AS_OF)  # retried tap
     assert len([e for e in fake.edits if e["text"] == "✓ noted."]) == 1
     assert conn.execute("SELECT COUNT(*) FROM processed_callbacks").fetchone()[0] == 1
