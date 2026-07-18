@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   lint:
-    name: Lint
+    name: Linting & Formatting
     runs-on: ubuntu-latest
     steps:
       # Third-party actions are pinned to commit SHAs (not moving tags).
