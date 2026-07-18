@@ -35,6 +35,12 @@ select = ["E", "F", "I", "W", "UP", "B"]
 # harmless inside test helpers.
 "tests/**" = ["E501", "B023", "B905"]
 
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+skip-magic-trailing-comma = false
+
 [tool.mypy]
 python_version = "3.12"
 ignore_missing_imports = true
