@@ -91,7 +91,7 @@ Fine **sub-labels** (Dining, Coffee/Snacks, Subscriptions, …) roll up via
    (pool_monthly_cents − cycle-to-date discretionary) ÷ days_to_next_payday)`.
    Payday is a nominal day-of-month (`payday.day_of_month`, default 23); Sentinel
    keeps **no holiday calendar**, so when the bank pays early (a weekend/bank
-   holiday) or late the owner logs the real day with `/paid-today`, which writes
+   holiday) or late the owner logs the real day with `/paidtoday`, which writes
    a per-cycle override that rolls the cycle. The pool is a config number;
    underspend rolls forward, overspend drags it down. Small refunds net against
    spend; a large unlabeled inflow (an unmapped transfer) is held out of the pool
@@ -102,7 +102,9 @@ Fine **sub-labels** (Dining, Coffee/Snacks, Subscriptions, …) roll up via
    (`reports.py`: Paretos, size bands, reconciliation, and month-over-month
    bucket deltas + `subscriptions.md` + charts).
 
-Commands (owner chat only): `/today /status /cat /sync /recat /date /paid-today`.
+Commands (owner chat only): `/today /status /cat /sync /recat /date /paidtoday`
+(published as the Telegram `/` menu via `setMyCommands` when the listener starts;
+`/paid-today` and `/paid_today` are accepted aliases).
 
 ---
 

@@ -1,4 +1,4 @@
-# ADR 004 — Payday-anchored safe-to-spend, with a manual `/paid-today` override
+# ADR 004 — Payday-anchored safe-to-spend, with a manual `/paidtoday` override
 
 **Status:** accepted · **Date:** 2026-07-18
 
@@ -31,7 +31,7 @@ the boundary). Discretionary spend and unlabeled inflows are summed over
 
 **Handle early/late pay by hand, not by calendar.** There is no weekday shifting
 and no holiday table. When pay lands off its nominal day, the owner runs
-`/paid-today` (optionally `/paid-today YYYY-MM-DD`), which writes a
+`/paidtoday` (optionally `/paidtoday YYYY-MM-DD`), which writes a
 `payday_actual:<YYYY-MM>` key in `state` for that cycle's month. `cycle_for`
 honours the override in place of the nominal day, so the cycle — and the pool
 reset — rolls to the real date. The mapping from a logged date to the cycle it

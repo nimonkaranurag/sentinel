@@ -4,7 +4,7 @@
 # taxonomy (validated at load). Learned mappings live in merchant_map.json,
 # not here — this file is only the seed.
 rules:
-  - pattern: "\\b(TESCO|LIDL|ALDI|DUNNES|SUPERVALU|CENTRA|SPAR|MARKS & SPENCER)\\b"
+  - pattern: "\\b(TESCO|LIDL|ALDI|DUNNES|SUPERVALU|CENTRA|SPAR|MACE|DAYBREAK|GALA|COSTCUTTER|MARKS & SPENCER)\\b|BUYMIE"
     category: Groceries
   # Food delivery → FoodDelivery. MUST precede the generic UBER->Transport rule
   # below (first match wins), so "UBER * EATS" is food, not a ride.
@@ -16,10 +16,34 @@ rules:
     category: Transport
   - pattern: "\\bANTHROPIC\\b|CLAUDE"
     category: Tools
-  - pattern: "\\bBJJ\\b|JIU ?JITSU|GRACIE BARRA|FLYEFIT|\\bGYM\\b"
+  - pattern: "\\bBJJ\\b|JIU ?JITSU|JUDO|GRACIE BARRA|FLYEFIT|\\bGYM\\b|\\bBOOTS\\b|CHEMIST WAREHO|LLOYDS PHARMAC|HEALTHCARE NOW|MYMIND"
     category: Health/Fitness
-  - pattern: "NETFLIX|SPOTIFY|DISNEY|YOUTUBE|APPLE\\.COM/BILL|ICLOUD|AMAZON PRIME|AUDIBLE"
+  - pattern: "NETFLIX|SPOTIFY|DISNEY|YOUTUBE|APPLE\\.COM/BILL|ICLOUD|AMAZON PRIME|AUDIBLE|\\bGOOGLE\\b|OPENAI|CHATGPT"
     category: Subscriptions
+  # National retail chains → Shopping.
+  - pattern: "\\b(PENNEYS|PRIMARK|NIKE|ADIDAS|BERSHKA|ZARA|STRADIVARIUS|JD|WATERSTONES|WH ?SMITH|EASONS?|HOLLAND (AND|&) BA)\\b|THE CARD SHOP"
+    category: Shopping
+  # National telecom / energy utilities → Utilities.
+  - pattern: "BORD GAIS|ELECTRIC IRELAND|SSE AIRTRICITY|\\bENERGIA\\b|VIRGIN MEDIA|VODAFO|\\bEIR\\b|PINERGY"
+    category: Utilities
+  # National coffee / snack chains and vending → Coffee/Snacks.
+  - pattern: "INSOMNIA|AUNTIE ANNE|\\bCOSTA\\b|STARBUCKS|BEHAN VENDING|COREVEND"
+    category: Coffee/Snacks
+  # Catering / staff canteen (COMPASS = Compass Group) → Dining.
+  - pattern: "\\bCOMPASS\\b"
+    category: Dining
+  # National cinema chains → Dates.
+  - pattern: "\\b(ODEON|OMNIPLEX|CINEWORLD|IMC)\\b"
+    category: Dates
+  # Chocolatier / card & gift shops → Gifts.
+  - pattern: "BUTLERS CHOCOL|CARD FACTORY|\\bHALLMARK\\b"
+    category: Gifts
+  # Fuel / forecourt convenience (fuel is the dominant use) → Transport.
+  - pattern: "CIRCLE K|\\bAPPLEGREEN\\b|\\bMAXOL\\b|TOP OIL"
+    category: Transport
+  # Foreign-exchange / remittance kiosks → Cash.
+  - pattern: "EBIXCASH"
+    category: Cash
   - pattern: "\\bATM\\b|CASH WITHDRAWAL|CASH LODGE"
     category: Cash
   - pattern: "\\bSALARY\\b|PAYROLL|\\bPAYE\\b"

@@ -184,6 +184,15 @@ def main(argv: list[str] | None = None) -> int:
             push_weekly_plan(conn, cfg, as_of=as_of, dry_run=args.dry_run)
         if args.digest:
             run_digest(conn, cfg, as_of=as_of, dry_run=args.dry_run)
+        if args.listen and not args.dry_run:
+            # Publish the '/' command menu when the always-on listener starts, so
+            # the deployed command set is discoverable. Best-effort: a transient
+            # failure here must not stop the bot from answering commands.
+            try:
+                telegram.set_my_commands(render.bot_command_menu())
+                log.info("registered %d bot commands", len(render.bot_command_menu()))
+            except telegram.NotifyError as exc:
+                log.warning("could not register bot command menu: %s", exc)
         if args.listen or args.updates:
             commands.process_updates(conn, cfg, as_of=as_of, listen=args.listen, dry_run=args.dry_run)
         return 0

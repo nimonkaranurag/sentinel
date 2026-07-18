@@ -75,7 +75,7 @@ labeled through the relabel loop or `rules.local.yaml`.
    **pay cycle** rather than the calendar month:
    `(discretionary pool − cycle-to-date discretionary spend) ÷ days to next payday`.
    The pool resets on payday (`payday.day_of_month`, default 23); when the bank
-   pays early or late, `/paid-today` logs the real day and the cycle rolls — no
+   pays early or late, `/paidtoday` logs the real day and the cycle rolls — no
    holiday calendar. Small refunds net against spend; a large unlabeled inflow
    (an unmapped transfer) is held out of the pool until labeled, so it cannot
    inflate the figure.
@@ -199,7 +199,7 @@ pointed at a group without letting other members drive the ledger — set
 | `/sync` | Attended bank pull (exempt from the daily unattended allowance) |
 | `/recat <ref> <category>` | Recategorize a transaction and teach its merchant |
 | `/date <ref>` | Mark one transaction as `Dates`, leaving the merchant untouched |
-| `/paid-today [date]` | Log the day your salary landed (early on a weekend/bank holiday, or late) so the pay cycle rolls to it |
+| `/paidtoday [date]` | Log the day your salary landed (early on a weekend/bank holiday, or late) so the pay cycle rolls to it (aliases: `/paid-today`, `/paid_today`) |
 
 The inline `[✓ fine]` `[Reclassify…]` keyboard accompanies every alert. Answering
 commands and taps in real time needs the **listener** running (see Scheduling):
@@ -207,6 +207,10 @@ commands and taps in real time needs the **listener** running (see Scheduling):
 ```sh
 uv run python -m sentinel.notify --listen   # the single always-on getUpdates reader
 ```
+
+On startup the listener publishes the `/` command menu (`setMyCommands`), so the
+commands above are discoverable with descriptions in any Telegram client. This is
+best-effort — a transient failure is logged and never stops the bot answering.
 
 ### Scheduling
 

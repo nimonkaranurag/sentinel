@@ -41,22 +41,40 @@ jobs:
       - run: uv run mypy sentinel
 
   test:
-    name: Test (${{ matrix.os }} · py${{ matrix.python-version }})
-    runs-on: ${{ matrix.os }}
+    name: Test (debian-trixie · py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    # The production host is Debian 13 (trixie) — see docs/DEPLOY.md — so the Linux
+    # tests run INSIDE a Debian container to exercise the actual deployment target
+    # rather than Ubuntu, which only approximates it. macOS (below) covers local
+    # dev. Lint/typecheck/security are OS-agnostic and stay on ubuntu-latest.
+    container: debian:trixie-slim
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
         python-version: ["3.12", "3.13"]
-        include:
-          # POSIX smoke on the primary interpreter; the bot is deployed on Linux.
-          - os: macos-latest
-            python-version: "3.12"
     steps:
+      # debian:*-slim is minimal: add what checkout + setup-uv + gitleaks-free
+      # runs expect (TLS roots, curl, git) before any other step.
+      - name: Bootstrap Debian container
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
         with:
           python-version: ${{ matrix.python-version }}
+      - run: uv sync --dev
+      - name: Tests + coverage (gated at 80%)
+        run: uv run pytest -q --cov=sentinel --cov-report=term-missing --cov-fail-under=80
+
+  test-macos:
+    name: Test (macos · py3.12)
+    runs-on: macos-latest         # POSIX smoke for the local-dev build
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
+        with:
+          python-version: "3.12"
       - run: uv sync --dev
       - name: Tests + coverage (gated at 80%)
         run: uv run pytest -q --cov=sentinel --cov-report=term-missing --cov-fail-under=80

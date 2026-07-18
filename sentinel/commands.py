@@ -161,7 +161,11 @@ def handle_command(conn, cfg: dict[str, Any], text: str, as_of: date) -> str:
     parts = text.strip().split()
     if not parts:
         return render.HELP_TEXT
-    cmd, args = parts[0].lower(), parts[1:]
+    # Strip a "@botname" suffix so commands also work when the bot is addressed
+    # in a group (Telegram sends "/today@sentinelbot" there).
+    cmd, args = parts[0].lower().split("@", 1)[0], parts[1:]
+    if cmd in ("/start", "/help"):
+        return render.HELP_TEXT
     if cmd == "/today":
         return render.compose_daily(conn, cfg, as_of)
     if cmd == "/status":
