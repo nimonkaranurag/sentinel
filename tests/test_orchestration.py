@@ -39,6 +39,9 @@ def env(tmp_path, monkeypatch):
         "db_path": str(tmp_path / "ledger.db"),
         "policies": {"path": str(pol)},
         "categorize": {"merchant_map_path": str(tmp_path / "merchant_map.json"), "rules_path": None},
+        # Hermetic: keep the developer machine's real bills.local.yaml out of
+        # run_poll/do_sync alert counts (the tmp path loads as an empty registry).
+        "bills": {"path": str(tmp_path / "bills.yaml")},
         "enable_banking": {"api_daily_call_limit": 4, "first_pull_days": 90},
     }
     return conn, cfg, fake

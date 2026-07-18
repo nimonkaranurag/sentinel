@@ -38,6 +38,7 @@ import matplotlib.pyplot as plt
 
 from . import db
 from .categorize import FIXED_CATEGORIES, NON_SPEND_CATEGORIES
+from .controller import unlabeled_inflow_exclude_cents
 from .db import fmt_eur
 
 log = logging.getLogger(__name__)
@@ -621,19 +622,27 @@ def render_report_md(data: dict[str, Any]) -> str:
 # ── Orchestration ─────────────────────────────────────────────────────────
 
 
-def month_over_month(conn, as_of: date) -> dict[str, Any]:
+def month_over_month(conn, as_of: date, inflow_exclude_cents: int = 0) -> dict[str, Any]:
     """
     Return spend per bucket for the last full month versus the one before, with
     deltas.
+
+    Netted like every other per-bucket surface (controller.spend_by_bucket, which
+    /status and the digest use): a refund offsets its purchase, and a large
+    Uncategorized inflow is held out rather than flattering the month it lands
+    in. Without this, a refunded charge counts as spend here while the digest
+    says it was netted — two answers for the same month.
     """
     from .categorize import BUCKETS, bucket
 
     def _by_bucket(month_key: str) -> dict[str, int]:
+        clause = "AND NOT (amount_cents >= ? AND category = 'Uncategorized') " if inflow_exclude_cents > 0 else ""
+        params: list[Any] = [month_key] + ([inflow_exclude_cents] if inflow_exclude_cents > 0 else [])
         rows = conn.execute(
             "SELECT category, SUM(-amount_cents) AS c FROM v_transactions_categorized "
-            "WHERE amount_cents < 0 AND category NOT IN ('Income', 'Transfers') "
-            "AND strftime('%Y-%m', booking_date) = ? GROUP BY category",
-            (month_key,),
+            "WHERE category NOT IN ('Income', 'Transfers') "
+            "AND strftime('%Y-%m', booking_date) = ? " + clause + "GROUP BY category",
+            params,
         ).fetchall()
         out = dict.fromkeys(BUCKETS, 0)
         for r in rows:
@@ -689,7 +698,7 @@ def run_reports(conn, cfg: dict[str, Any], as_of: date | None = None, dry_run: b
         "weekday": weekday_profile(conn, start, end),
         "daily": daily_spend(conn, start, end),
         "months": months,
-        "mom": month_over_month(conn, as_of),
+        "mom": month_over_month(conn, as_of, unlabeled_inflow_exclude_cents(cfg)),
         "recurring": detect_recurring(conn, cfg, as_of),
         "budget_cents": budget,
         "budget_source": budget_source,

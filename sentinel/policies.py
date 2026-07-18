@@ -7,6 +7,11 @@ escalating templated alert, computed by arithmetic alone: the merchant and
 amount, the occurrence count this month, the month-to-date total against the cap,
 and the annualized pace.
 
+Month-to-date is NETTED (SPEC §4): a refund matching the same policy offsets its
+purchase, so refunds never fire false alerts — except a large *Uncategorized*
+inflow (an unlabeled transfer), which is held out of the netting exactly as
+safe-to-spend holds it out of the pool, so it cannot suppress genuine alerts.
+
 policies.yaml is schema-checked at load. Each policy requires a name, a
 cap_monthly_cents, and exactly one matcher (bucket, sub_label, or pattern); a
 missing, unknown, or misspelled key raises rather than defaulting silently.
@@ -24,6 +29,7 @@ import yaml
 
 from . import db
 from .categorize import BUCKETS, TAXONOMY, bucket
+from .controller import month_bounds, unlabeled_inflow_exclude_cents
 from .normalize import display_merchant, normalize
 
 log = logging.getLogger(__name__)
@@ -99,30 +105,46 @@ def evaluate(
     Return {txn_id, policy, text} for each newly-booked spend transaction that
     trips a policy over its monthly cap.
 
+    The month-to-date total is netted: refunds (positive amounts matching the
+    same policy) offset their purchases, so a refunded charge cannot fire a
+    false alert (SPEC §4). Large Uncategorized inflows are held out of the
+    netting (see module docstring). Only spend transactions can be alert
+    subjects or count toward the occurrence ordinal.
+
+    The window runs to the END of as_of's month, not to as_of: the watermark
+    visits each row exactly once, so a booking stamped by a calendar slightly
+    ahead of Europe/Dublin (a CET/EET-dated row landing near midnight) must be
+    evaluable on the poll that first sees it — clamping at as_of would drop its
+    alert forever.
+
     Read-only; the caller sends and records the alerts.
     """
     policies = load_policies(path or (cfg.get("policies") or {}).get("path"))
     if not policies:
         return []
-    month_start = as_of.replace(day=1).isoformat()
+    month_start, month_end, _ = month_bounds(as_of)
     # Query the base table (not the view) so we get rowid: booking_date is
     # day-granular, so ordering by it alone lets same-day charges that were
     # inserted later count into an earlier one's "9th this month". rowid is
     # insertion order and breaks the tie deterministically.
-    month_txns = conn.execute(
+    rows = conn.execute(
         "SELECT t.rowid AS rid, t.id, t.booking_date, t.merchant_raw, "
         "  COALESCE(t.category_override, m.category, 'Uncategorized') AS category, "
         "  t.amount_cents "
         "FROM transactions t LEFT JOIN merchants m ON m.id = t.merchant_id "
-        "WHERE t.amount_cents < 0 AND t.booking_date >= ? AND t.booking_date <= ? "
+        "WHERE t.booking_date >= ? AND t.booking_date <= ? "
         "ORDER BY t.booking_date, t.rowid",
-        (month_start, as_of.isoformat()),
+        (month_start.isoformat(), month_end.isoformat()),
     ).fetchall()
+    exclude = unlabeled_inflow_exclude_cents(cfg)
+    month_txns = [
+        t for t in rows if not (exclude > 0 and t["amount_cents"] >= exclude and t["category"] == "Uncategorized")
+    ]
     new_ids = set(new_txn_ids)
     alerts = []
     for txn in month_txns:
-        if txn["id"] not in new_ids:
-            continue
+        if txn["id"] not in new_ids or txn["amount_cents"] >= 0:
+            continue  # a refund/inflow nets into MTD but never fires an alert itself
         for p in policies:
             if not _matches(p, txn):
                 continue
@@ -131,8 +153,9 @@ def evaluate(
                 for t in month_txns
                 if _matches(p, t) and (t["booking_date"], t["rid"]) <= (txn["booking_date"], txn["rid"])
             ]
-            mtd = sum(-t["amount_cents"] for t in prior)
+            mtd = sum(-t["amount_cents"] for t in prior)  # refunds subtract
+            count = sum(1 for t in prior if t["amount_cents"] < 0)  # "Nth this month" counts charges only
             if mtd > int(p["cap_monthly_cents"]):
-                alerts.append({"txn_id": txn["id"], "policy": p["name"], "text": alert_text(p, txn, mtd, len(prior))})
+                alerts.append({"txn_id": txn["id"], "policy": p["name"], "text": alert_text(p, txn, mtd, count)})
             break  # first matching policy wins
     return alerts

@@ -47,7 +47,7 @@ sentinel/
   telegram.py  render.py  alerts.py  commands.py  notify.py       # Telegram surface
 merchant_map.json (repo root, git-ignored)  config.yaml  .env.example
 scripts/pre-commit  .pii-patterns.example  tests/  data/backfill/  reports/  backups/  docs/
-Makefile targets: init | hooks | backfill | categorize | relink | report | poll | notify | plan | digest | backup | test
+Makefile targets: init | hooks | secrets | backfill | categorize | relink | report | poll | notify | plan | digest | backup | test
 ```
 
 ## Conventions

@@ -98,7 +98,7 @@ def test_paid_today_rolls_the_cycle_when_paid_early(tmp_path):
     assert before["discretionary_spent_cents"] == 70_000
 
     reply = commands.do_paid_today(conn, cfg, "", date(2026, 7, 21))  # "paid today", the 21st
-    assert "21 Jul" in reply and "2 days early" in reply and "22 Aug" in reply
+    assert "21 Jul" in reply and "2 days early" in reply and "23 Aug" in reply
     assert db.get_state(conn, state_keys.payday_actual(2026, 7)) == "2026-07-21"
 
     after = controller.safe_to_spend(conn, cfg, date(2026, 7, 22))
@@ -163,9 +163,9 @@ def test_today_and_status_read_cleanly(tmp_path):
     assert "to payday" in today and "€1,200.00 budget" in today
     assert "pool" not in today.lower(), "no jargon in the bot text"
     status = render.status_text(conn, cfg, date(2026, 7, 18))
-    assert status.startswith("📊 This pay cycle")
-    assert "Groceries" in status and "Safe to spend today: €" in status
-    assert "acc-uid" not in status, "no account id can reach the chat"
+    assert status.text.startswith("📊 This pay cycle") and status.parse_mode == "HTML"
+    assert "Groceries" in status.text and "Safe to spend today: €" in status.text
+    assert "acc-uid" not in status.text, "no account id can reach the chat"
     conn.close()
 
 

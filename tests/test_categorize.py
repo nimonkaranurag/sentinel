@@ -58,9 +58,14 @@ def build_ledger(conn):
 def make_cfg(tmp_path, merchant_map=None):
     map_path = tmp_path / "merchant_map.json"
     map_path.write_text(json.dumps(merchant_map or {}))
+    # Copy the bundled seed rules into tmp: load_rules() merges a rules.local.yaml
+    # SIBLING of the rules file, so pointing at the real package path would let a
+    # developer machine's git-ignored personal rules leak into these assertions.
+    rules_path = tmp_path / "rules.yaml"
+    rules_path.write_text(categorize.DEFAULT_RULES_PATH.read_text(encoding="utf-8"))
     return {
         "db_path": str(tmp_path / "ledger.db"),
-        "categorize": {"merchant_map_path": str(map_path), "rules_path": None},
+        "categorize": {"merchant_map_path": str(map_path), "rules_path": str(rules_path)},
     }
 
 
@@ -100,8 +105,10 @@ def test_owner_map_labels_non_regex_merchants(conn, tmp_path):
 
 
 def test_relink_is_atomic_and_preserves_manual_labels(conn, tmp_path):
-    """--relink rebuilds in one transaction and restores owner 'manual' labels
-    from the map, instead of committing an unlabeled ledger mid-rebuild."""
+    """
+    --relink rebuilds in one transaction and restores owner 'manual' labels
+    from the map, instead of committing an unlabeled ledger mid-rebuild.
+    """
     cfg = make_cfg(tmp_path, merchant_map=OWNER_MAP)
     categorize.run(conn, cfg)
     # An owner correction NOT in the map, but mirrored into the map (as /recat does):
@@ -192,3 +199,135 @@ def test_seed_rules_load_and_are_taxonomy_valid():
     rules = categorize.load_rules()
     assert rules, "seed rules.yaml must not be empty"
     assert all(cat in categorize.TAXONOMY for _, cat in rules)
+
+
+def test_seed_lodgements_are_transfers_not_cash_spend():
+    """
+    A cash lodgement is an INFLOW; labeled 'Cash' it would land in the Other
+    bucket and net against the discretionary pool, inflating safe-to-spend.
+    """
+    rules = categorize._compile_rules_file(categorize.DEFAULT_RULES_PATH)  # seed only, no local merge
+    assert categorize.match_rules(rules, "CASH LODGE") == "Transfers"
+    # The lodgement rule must OUTRANK \bATM\b — an ATM lodgement is a deposit.
+    assert categorize.match_rules(rules, "ATM LODGEMENT DAME ST") == "Transfers"
+    assert categorize.match_rules(rules, "ATM WITHDRAWAL MAIN ST") == "Cash"
+    assert categorize.match_rules(rules, "CASH WITHDRAWAL") == "Cash"
+
+
+def test_malformed_rules_fail_with_file_and_rule_context(tmp_path):
+    bad = tmp_path / "rules.yaml"
+    bad.write_text('rules:\n  - pattern: "TESCO("\n    category: Groceries\n')
+    with pytest.raises(ValueError, match=r"rule #1.*invalid regex"):
+        categorize._compile_rules_file(bad)
+    bad.write_text("rules:\n  - category: Groceries\n")
+    with pytest.raises(ValueError, match=r"rule #1.*needs 'pattern'"):
+        categorize._compile_rules_file(bad)
+
+
+def test_poison_merchant_map_entries_degrade_to_rules_not_crash(conn, tmp_path, caplog):
+    """
+    The map is owner-written (SPEC §3): one bad hand-edit must not crash the
+    poll — the merchant falls through to the rules tier, loudly.
+    """
+    bad_map = {
+        "NETFLIX.COM": "Subscriptions",  # bare string, not an object
+        "ANTHROPIC": {"category": "Toolz", "by": "manual"},  # category typo
+    }
+    stats = categorize.run(conn, make_cfg(tmp_path, merchant_map=bad_map))
+    assert stats["by_dict"] == 0
+    rows = {
+        r["name_normalized"]: (r["category"], r["categorized_by"])
+        for r in conn.execute("SELECT name_normalized, category, categorized_by FROM merchants")
+    }
+    assert rows["NETFLIX.COM"] == ("Subscriptions", "regex")  # via the rules tier
+    assert rows["ANTHROPIC"] == ("Tools", "regex")
+    assert "not an object" in caplog.text and "Toolz" in caplog.text
+
+
+def test_manual_uncategorized_survives_cascade_and_relink(conn, tmp_path):
+    """
+    A typed `/recat <ref> uncategorized` writes a manual 'Uncategorized' map
+    entry — an explicit unlabel. It must beat the regex tier and survive
+    --relink, or the rules would silently override the owner's decision.
+    """
+    mapping = dict(OWNER_MAP)
+    mapping["NETFLIX.COM"] = {"category": "Uncategorized", "by": "manual", "confidence": 1.0}
+    cfg = make_cfg(tmp_path, merchant_map=mapping)
+    categorize.run(conn, cfg)
+    row = conn.execute(
+        "SELECT category, categorized_by FROM merchants WHERE name_normalized = 'NETFLIX.COM'"
+    ).fetchone()
+    assert tuple(row) == ("Uncategorized", "manual")
+    categorize.relink(conn, cfg)
+    row = conn.execute(
+        "SELECT category, categorized_by FROM merchants WHERE name_normalized = 'NETFLIX.COM'"
+    ).fetchone()
+    assert tuple(row) == ("Uncategorized", "manual")
+
+
+def test_blob_variants_of_one_merchant_are_not_a_collision(tmp_path, caplog):
+    """
+    The EB {…} blob embeds a per-transaction timestamp, so ONE merchant yields
+    a new raw string every charge. That is normalize() doing its job — not a
+    merchant-key collision — and it must not warn: the deploy-time relink streams
+    this log into a public Actions log, so per-variant warnings sprayed 171 raw
+    ledger lines (with timestamps) per deploy.
+    """
+    connection = db.connect(tmp_path / "ledger.db")
+    db.init_db(connection)
+    db.insert_transactions(
+        connection,
+        [
+            {
+                "account_id": ACCOUNT,
+                "booking_date": f"2026-07-{day:02d}",
+                "amount_cents": -1_000,
+                "merchant_raw": f"VDP-UBR* PENDING.U {{ PAYMENTINITIATIONDATETIME : 2026-07-{day:02d}T09:00:00 }}",
+                "source": "api",
+            }
+            for day in (1, 2, 3)
+        ],
+    )
+    connection.commit()
+    with caplog.at_level("WARNING"):
+        categorize.link_transactions(connection)
+    assert "merchant-key collision" not in caplog.text
+    n = connection.execute("SELECT COUNT(*) FROM merchants").fetchone()[0]
+    assert n == 1  # all three variants link to ONE merchant
+    connection.close()
+
+
+def test_genuinely_distinct_raws_warn_collision_once(tmp_path, caplog):
+    connection = db.connect(tmp_path / "ledger.db")
+    db.init_db(connection)
+    db.insert_transactions(
+        connection,
+        [
+            {
+                "account_id": ACCOUNT,
+                "booking_date": "2026-07-01",
+                "amount_cents": -1_000,
+                "merchant_raw": raw,
+                "source": "api",
+            }
+            for raw in ("VDP-TESCO STORES 4368", "POS TESCO STORES", "VDP-TESCO STORES 4368 { BLOB : X }")
+        ],
+    )
+    connection.commit()
+    with caplog.at_level("WARNING"):
+        categorize.link_transactions(connection)
+    # Two distinct pre-blob identities → exactly one warning; the blob variant of
+    # the first identity adds nothing.
+    assert caplog.text.count("merchant-key collision") == 1
+    connection.close()
+
+
+def test_bucket_category_sets_are_derived_from_the_rollup():
+    """
+    FIXED/NON_SPEND must be exactly the sub-labels the bucket rollup calls
+    Fixed / Income+Transfers — hand-maintained copies had already drifted
+    (Subscriptions and Fees are Fixed in the rollup but were missing).
+    """
+    assert set(categorize.FIXED_CATEGORIES) == {c for c in categorize.TAXONOMY if categorize.bucket(c) == "Fixed"}
+    assert {"Subscriptions", "Fees"} <= set(categorize.FIXED_CATEGORIES)
+    assert set(categorize.NON_SPEND_CATEGORIES) == {"Income", "Transfers"}

@@ -136,6 +136,50 @@ def test_early_match_window_is_configurable(tmp_path):
     conn.close()
 
 
+def test_bill_patterns_match_the_normalized_surface(tmp_path):
+    """
+    Bill patterns match the normalized name (uppercased, VDP- prefix + {…} enrichment blob stripped).
+    So an anchored pattern survives a card prefix, and blob junk can no longer
+    fake a payment.
+    """
+    conn = _conn_with(
+        tmp_path,
+        [
+            {
+                "account_id": "a",
+                "booking_date": "2026-07-15",
+                "amount_cents": -8000,
+                "merchant_raw": "VDP-VIRGIN MEDIA IRELAND { TRANSACTIONSUBTYPE : DIRECT DEBIT }",
+                "source": "api",
+            },
+            {
+                "account_id": "a",
+                "booking_date": "2026-07-15",
+                "amount_cents": -8000,
+                "merchant_raw": "PEARL BRASSERI { CATEGORYDETAIL : LEISURE & ENTERTAINMENT }",
+                "source": "api",
+            },
+        ],
+    )
+    # Anchored pattern matches despite the VDP- prefix and the blob → paid, silent.
+    anchored = (
+        "grace_days: 3\nbills:\n"
+        "  - name: Broadband\n    pattern: '^VIRGIN MEDIA'\n    due_day: 15\n"
+        "    expected_cents: 8000\n    tolerance_pct: 10\n"
+    )
+    assert bills.check(conn, {}, date(2026, 7, 20), path=_bills_file(tmp_path, anchored)) == []
+    # 'LEISURE' appears ONLY inside the enrichment blob: it must NOT count as a
+    # payment (the raw-name match would have), so the bill reads late.
+    blob_bait = (
+        "grace_days: 3\nbills:\n"
+        "  - name: ClubDues\n    pattern: 'LEISURE'\n    due_day: 15\n"
+        "    expected_cents: 8000\n    tolerance_pct: 10\n"
+    )
+    late = bills.check(conn, {}, date(2026, 7, 20), path=_bills_file(tmp_path, blob_bait))
+    assert len(late) == 1 and late[0]["kind"] == "late"
+    conn.close()
+
+
 def test_send_alerts_fires_once_per_cycle(tmp_path, monkeypatch):
     conn = _conn_with(tmp_path, [])  # nothing paid → Broadband is late by 2026-07-20
     sent = []

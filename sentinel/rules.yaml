@@ -44,7 +44,14 @@ rules:
   # Foreign-exchange / remittance kiosks → Cash.
   - pattern: "EBIXCASH"
     category: Cash
-  - pattern: "\\bATM\\b|CASH WITHDRAWAL|CASH LODGE"
+  # Cash lodgements are INFLOWS (cash into the account), not spend: Transfers
+  # keeps them out of the spend buckets. Labeled "Cash" they'd land in the Other
+  # bucket and NET against the discretionary pool, inflating safe-to-spend —
+  # sidestepping the unlabeled-inflow hold-out because they'd carry a label.
+  # MUST precede the ATM rule: "ATM LODGEMENT" is a lodgement, not a withdrawal.
+  - pattern: "LODGEMENT|CASH LODGE"
+    category: Transfers
+  - pattern: "\\bATM\\b|CASH WITHDRAWAL"
     category: Cash
   - pattern: "\\bSALARY\\b|PAYROLL|\\bPAYE\\b"
     category: Income

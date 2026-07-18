@@ -10,12 +10,29 @@ reach the push.
 
 from __future__ import annotations
 
+import html
+from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
 
 from . import bills, categorize, controller, db
 from .db import fmt_eur
 from .normalize import display_merchant
+
+
+@dataclass
+class Reply:
+    """
+    A composed bot reply: text plus an optional Telegram parse_mode and inline
+    keyboard. Command handlers return this (or a bare str, auto-wrapped) so the
+    router can send monospace tables (parse_mode="HTML") and clickable buttons,
+    not just tab-spaced plain text.
+    """
+
+    text: str
+    parse_mode: str | None = None
+    reply_markup: dict[str, Any] | None = None
+
 
 # The bot's command menu. Telegram's setMyCommands requires names of [a-z0-9_]
 # (1–32 chars) — no hyphen — so the registered/canonical name is `paidtoday`; the
@@ -48,10 +65,40 @@ def bot_command_menu() -> list[dict[str, str]]:
 RELABEL_CHOICES = tuple(c for c in categorize.TAXONOMY if c != "Uncategorized")
 
 # Friendlier display labels for the money buckets (SPEC §3); others print as-is.
-BUCKET_LABELS = {"FoodDelivery": "Food delivery"}
+# "Other" is a catch-all ROLLUP (Dining, Coffee, Shopping, Transport, …), so it
+# reads as "Misc." — distinct from the near-empty "Other" sub-label /cat queries.
+BUCKET_LABELS = {"FoodDelivery": "Food delivery", "Other": "Misc."}
 
 
 # ── Small text helpers ──────────────────────────────────────────────────────
+
+
+def _esc(text: str) -> str:
+    """
+    HTML-escape dynamic text for parse_mode="HTML" (merchant names carry & < >,
+    e.g. "MARKS & SPENCER"). Amounts/labels have none but escaping is harmless.
+    """
+    return html.escape(str(text), quote=False)
+
+
+def mono_table(rows: list[list[str]], right: set[int] | None = None) -> str:
+    """
+    Render rows as a Telegram monospace <pre> table with per-column padding, so
+    the columns actually line up (Telegram's default proportional font makes
+    space-padded plain text ragged). Columns whose index is in `right` are
+    right-justified (amounts); the rest left. Cell text is HTML-escaped.
+    """
+    right = right or set()
+    ncols = max((len(r) for r in rows), default=0)
+    widths = [max((len(r[i]) for r in rows if i < len(r)), default=0) for i in range(ncols)]
+    out = []
+    for r in rows:
+        cells = [
+            (r[i].rjust(widths[i]) if i in right else r[i].ljust(widths[i])) if i < len(r) else " " * widths[i]
+            for i in range(ncols)
+        ]
+        out.append("  ".join(cells).rstrip())
+    return "<pre>" + _esc("\n".join(out)) + "</pre>"
 
 
 def plural(n: int, word: str, plural_word: str | None = None) -> str:
@@ -64,10 +111,11 @@ def plural(n: int, word: str, plural_word: str | None = None) -> str:
 
 def fmt_day(d: date) -> str:
     """
-    Format a date for the chat surface as e.g. "Wed 23 Jul" (no leading zero,
-    locale-independent).
+    Format a date for the chat surface as "23 Jul" — no weekday, no leading zero,
+    locale-independent. Weekday names were dropped deliberately: they added no
+    information and invited "is that day-of-week right?" second-guessing.
     """
-    return f"{d.strftime('%a')} {d.day} {d.strftime('%b')}"
+    return f"{d.day} {d.strftime('%b')}"
 
 
 # ── Daily / status ──────────────────────────────────────────────────────────
@@ -84,8 +132,8 @@ def traffic_light(cfg: dict[str, Any], safe_cents: int) -> str:
 
 def _payday_line(s: dict[str, Any]) -> str:
     """
-    Return the "N days to payday (Wed 23 Jul)" clause shared by /today and
-    /status, noting when the current cycle started from a logged /paid-today.
+    Return the "N days to payday (23 Jul)" clause used by /today, noting when the
+    current cycle started from a logged /paidtoday.
     """
     days = plural(s["days_left"], "day")
     when = fmt_day(date.fromisoformat(s["next_payday"]))
@@ -112,15 +160,20 @@ def compose_daily(conn, cfg: dict[str, Any], as_of: date) -> str:
     return f"Safe to spend today: {fmt_eur(s['safe_today_cents'])}  {badge}\n\n{budget_status}\n{spent_line}"
 
 
-def status_text(conn, cfg: dict[str, Any], as_of: date) -> str:
+def status_text(conn, cfg: dict[str, Any], as_of: date) -> Reply:
     """
-    Compose /status: the pay-cycle window, spend by bucket, the spending budget,
-    any holds (unlabeled inflow / quarantine), and today's number.
+    Compose /status: the pay-cycle window, spend by bucket (an aligned table),
+    the spending budget, any holds (unlabeled inflow / quarantine), and today's
+    number. HTML so the bucket table renders monospace.
     """
     s = controller.safe_to_spend(conn, cfg, as_of)
     cycle_start = date.fromisoformat(s["cycle_start"])
-    early = "  ·  payday logged early" if s["cycle_start_source"] == "logged" else ""
-    lines = [f"📊 This pay cycle{early}", f"{fmt_day(cycle_start)} → {fmt_day(as_of)}  ·  {_payday_line(s)}", ""]
+    next_payday = date.fromisoformat(s["next_payday"])
+    early = ", payday logged early" if s["cycle_start_source"] == "logged" else ""
+    # The cycle is payday → next payday (e.g. 23 Jun → 23 Jul). Show THAT, not
+    # today's date, so the two dates can't look like conflicting cycle-ends.
+    window = f"{fmt_day(cycle_start)} → {fmt_day(next_payday)}"
+    lines = [f"📊 This pay cycle: {window} ({plural(s['days_left'], 'day')} left{early})", ""]
 
     spent = [
         (BUCKET_LABELS.get(b, b), s["by_bucket_cents"].get(b, 0))
@@ -128,9 +181,8 @@ def status_text(conn, cfg: dict[str, Any], as_of: date) -> str:
         if s["by_bucket_cents"].get(b, 0)
     ]
     if spent:
-        width = max(len(label) for label, _ in spent)
         lines.append("Spent this cycle:")
-        lines += [f"  {label:<{width}}  {fmt_eur(cents)}" for label, cents in spent]
+        lines.append(mono_table([[label, fmt_eur(cents)] for label, cents in spent], right={1}))
         lines.append("")
 
     remaining = s["remaining_cents"]
@@ -155,7 +207,7 @@ def status_text(conn, cfg: dict[str, Any], as_of: date) -> str:
         ]
 
     lines += ["", f"Safe to spend today: {fmt_eur(s['safe_today_cents'])}  {traffic_light(cfg, s['safe_today_cents'])}"]
-    return "\n".join(lines)
+    return Reply("\n".join(lines), parse_mode="HTML")
 
 
 def sync_reply(inserted: int, submitted: int, fired: int) -> str:
@@ -182,15 +234,62 @@ def resolve_category(name: str) -> str | None:
     return None
 
 
-def cat_text(conn, cfg: dict[str, Any], name: str, as_of: date) -> str:
+def _bucket_of_name(name: str) -> str | None:
+    """
+    Match a /cat argument against a math BUCKET by its key or display label, so
+    `/cat misc` (or `/cat other`) drills into the Other rollup rather than the
+    near-empty "Other" sub-label.
+    """
+    wanted = name.strip().lower().rstrip(".")
+    for b in categorize.BUCKETS:
+        if b.lower() == wanted or BUCKET_LABELS.get(b, b).lower().rstrip(".") == wanted:
+            return b
+    return None
+
+
+def _bucket_breakdown(conn, bucket_key: str, as_of: date) -> Reply:
+    """
+    /cat <bucket>: the sub-labels that roll up into a math bucket, as a table —
+    the drill-down for the aggregated /status rows (esp. Misc).
+    """
+    month_start, _, _ = controller.month_bounds(as_of)
+    rows = conn.execute(
+        "SELECT category, SUM(-amount_cents) AS spend FROM v_transactions_categorized "
+        "WHERE amount_cents < 0 AND booking_date >= ? AND booking_date <= ? GROUP BY category",
+        (month_start.isoformat(), as_of.isoformat()),
+    ).fetchall()
+    items = sorted(
+        ((r["category"], r["spend"]) for r in rows if categorize.bucket(r["category"]) == bucket_key and r["spend"]),
+        key=lambda kv: -kv[1],
+    )
+    label = BUCKET_LABELS.get(bucket_key, bucket_key)
+    if not items:
+        return Reply(f"{label}: {fmt_eur(0)} this month.")
+    table = mono_table([[c, fmt_eur(v)] for c, v in items], right={1})
+    total = sum(v for _, v in items)
+    return Reply(
+        f"{label}: {fmt_eur(total)} this month, by category:\n{table}\nTip: /cat <category> for the transactions.",
+        parse_mode="HTML",
+    )
+
+
+def cat_text(conn, cfg: dict[str, Any], name: str, as_of: date) -> Reply:
+    """
+    /cat <category>: that sub-label's recent transactions as an aligned table.
+    An unknown name that matches a bucket drills into it; otherwise offer the
+    tappable category picker instead of dumping the whole taxonomy.
+    """
     cat = resolve_category(name)
     if cat is None:
-        return f"Unknown category {name!r}. Valid: {', '.join(categorize.TAXONOMY)}"
+        bucket_key = _bucket_of_name(name)
+        if bucket_key:
+            return _bucket_breakdown(conn, bucket_key, as_of)
+        return Reply(f'No category called "{name.strip()}". Tap one:', reply_markup=category_view_keyboard())
     month_start, _, _ = controller.month_bounds(as_of)
     rows = conn.execute(
         "SELECT id, booking_date, merchant_raw, amount_cents FROM v_transactions_categorized "
         "WHERE category = ? AND booking_date >= ? AND booking_date <= ? AND amount_cents < 0 "
-        "ORDER BY booking_date DESC LIMIT 8",
+        "ORDER BY booking_date DESC LIMIT 10",
         (cat, month_start.isoformat(), as_of.isoformat()),
     ).fetchall()
     total = conn.execute(
@@ -198,14 +297,24 @@ def cat_text(conn, cfg: dict[str, Any], name: str, as_of: date) -> str:
         "WHERE category = ? AND booking_date >= ? AND booking_date <= ? AND amount_cents < 0",
         (cat, month_start.isoformat(), as_of.isoformat()),
     ).fetchone()[0]
-    lines = [f"{cat} ({categorize.bucket(cat)}): {fmt_eur(total)} this month"]
-    lines += [
-        f"{r['id'][:8]} · {r['booking_date']} · {display_merchant(r['merchant_raw']) or '—'} · "
-        f"{fmt_eur(-r['amount_cents'])}"
-        for r in rows
-    ]
-    lines.append("(use the 8-char ref with /recat or /date)" if rows else "No transactions this month.")
-    return "\n".join(lines)
+    bucket_label = BUCKET_LABELS.get(categorize.bucket(cat), categorize.bucket(cat))
+    head = f"{cat} ({bucket_label}): {fmt_eur(total)} this month"
+    if not rows:
+        return Reply(f"{head}\nNo transactions this month.")
+    table = mono_table(
+        [["ref", "date", "merchant", "€"]]
+        + [
+            [
+                r["id"][:8],
+                r["booking_date"][5:],  # MM-DD
+                (display_merchant(r["merchant_raw"]) or "—")[:16],
+                fmt_eur(-r["amount_cents"]),
+            ]
+            for r in rows
+        ],
+        right={3},
+    )
+    return Reply(f"{head}\n{table}\nTip: use a ref with /recat or /date.", parse_mode="HTML")
 
 
 # ── Alert keyboards ─────────────────────────────────────────────────────────
@@ -222,6 +331,16 @@ def alert_keyboard(txn_id: str) -> dict[str, Any]:
 
 def reclass_keyboard(ref: str) -> dict[str, Any]:
     btns = [{"text": c, "callback_data": f"set:{ref}:{c}"} for c in RELABEL_CHOICES]
+    return {"inline_keyboard": [btns[i : i + 3] for i in range(0, len(btns), 3)]}
+
+
+def category_view_keyboard() -> dict[str, Any]:
+    """
+    Inline keyboard to VIEW a category's transactions (callback `cat:<category>`),
+    offered when /cat is given no argument or an unknown name — so the owner taps
+    instead of typing "Health/Fitness".
+    """
+    btns = [{"text": c, "callback_data": f"cat:{c}"} for c in RELABEL_CHOICES]
     return {"inline_keyboard": [btns[i : i + 3] for i in range(0, len(btns), 3)]}
 
 

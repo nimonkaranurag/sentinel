@@ -3,8 +3,10 @@
 # git-ignored sentinel/bills.local.yaml (merged ahead of this file). Seed the
 # registry from `python -m sentinel.reports` → reports/subscriptions.md.
 #
-# Each bill: name, pattern (regex on the merchant), due_day (1–31, clamped to the
-# month length so 31 → Feb 28/29), expected_cents (positive integer cents),
+# Each bill: name, pattern (regex on the NORMALIZED merchant name — the same
+# surface rules.yaml and policy patterns match: uppercased, processor prefixes
+# and the {…} enrichment blob stripped), due_day (1–31, clamped to the month
+# length so 31 → Feb 28/29), expected_cents (positive integer cents),
 # tolerance_pct (0–100). Values are range-validated at load — a typo crashes.
 grace_days: 3
 bills: []
