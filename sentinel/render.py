@@ -43,6 +43,7 @@ def bot_command_menu() -> list[dict[str, str]]:
     """
     return [{"command": name, "description": desc} for name, desc in BOT_COMMANDS]
 
+
 # Categories offered in the inline reclassify grid (everything but the sentinel).
 RELABEL_CHOICES = tuple(c for c in categorize.TAXONOMY if c != "Uncategorized")
 

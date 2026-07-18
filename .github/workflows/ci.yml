@@ -24,8 +24,10 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
       - run: uv sync --dev
-      - name: Ruff
+      - name: Linting
         run: uv run ruff check .
+      - name: Formatting
+        run: uv run ruff format --check --diff .
       - name: Lockfile is in sync with pyproject
         # The committed uv.lock must track pyproject; fail if deps changed without
         # re-locking, since the deploy host is provisioned from the lockfile.

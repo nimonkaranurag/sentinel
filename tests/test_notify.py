@@ -297,8 +297,11 @@ def test_set_my_commands_registers_via_transport(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "777")
     calls = []
-    monkeypatch.setattr(telegram, "_post_telegram",
-                        lambda tok, method, payload: calls.append((method, payload)) or {"ok": True, "result": True})
+    monkeypatch.setattr(
+        telegram,
+        "_post_telegram",
+        lambda tok, method, payload: calls.append((method, payload)) or {"ok": True, "result": True},
+    )
     telegram.set_my_commands(render.bot_command_menu())
     assert len(calls) == 1 and calls[0][0] == "setMyCommands"
     assert calls[0][1]["commands"][0] == {"command": "today", "description": "What's safe to spend today"}
