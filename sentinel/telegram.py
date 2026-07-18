@@ -114,6 +114,17 @@ def answer_callback(callback_id: str, text: str = "") -> None:
     _post_telegram(token, "answerCallbackQuery", {"callback_query_id": callback_id, "text": text})
 
 
+def set_my_commands(commands: list[dict[str, str]]) -> None:
+    """
+    Register the bot's command menu (the '/' autocomplete list) via setMyCommands.
+
+    `commands` is a list of {"command", "description"} dicts; Telegram requires
+    each command name to be 1–32 chars of [a-z0-9_]. Called once when the listener
+    starts so the menu tracks the deployed command set.
+    """
+    post("setMyCommands", {"commands": commands})
+
+
 def get_updates(offset: int, timeout: int) -> list[dict[str, Any]]:
     """
     Call getUpdates and return the raw update list, unwrapped from the JSON

@@ -4,7 +4,7 @@ from datetime import date
 
 import pytest
 
-from sentinel import commands, controller, db, notify, telegram
+from sentinel import commands, controller, db, notify, render, telegram
 from tests.test_reports import AS_OF, build_ledger
 
 # /today and the daily push lead with the headline line, then a pool + payday
@@ -265,8 +265,43 @@ def test_process_updates_only_honors_owner_sender(bot):
 def test_unknown_command_returns_help(bot):
     conn, cfg, _ = bot
     reply = commands.handle_command(conn, cfg, "/frobnicate", AS_OF)
-    for cmd in ("/today", "/status", "/cat", "/sync", "/recat", "/date", "/paid-today"):
+    for cmd in ("/today", "/status", "/cat", "/paidtoday", "/sync", "/recat", "/date", "/help"):
         assert cmd in reply
+
+
+def test_help_and_start_and_group_suffix_route_to_help(bot):
+    conn, cfg, _ = bot
+    for text in ("/help", "/start", "/help@sentinelbot"):
+        assert commands.handle_command(conn, cfg, text, AS_OF) == render.HELP_TEXT
+
+
+def test_paidtoday_aliases_all_route(bot):
+    conn, cfg, _ = bot
+    for text in ("/paidtoday", "/paid-today", "/paid_today", "/paidtoday@sentinelbot"):
+        reply = commands.handle_command(conn, cfg, text, AS_OF)
+        assert reply.startswith("✅ Logged payday"), (text, reply)
+
+
+def test_bot_command_menu_is_telegram_valid():
+    """setMyCommands names must be [a-z0-9_]{1,32}; the menu and /help must not drift."""
+    menu = render.bot_command_menu()
+    names = {c["command"] for c in menu}
+    assert {"today", "status", "cat", "paidtoday", "sync", "recat", "date", "help"} <= names
+    for c in menu:
+        assert re.fullmatch(r"[a-z0-9_]{1,32}", c["command"]), c
+        assert 1 <= len(c["description"]) <= 256
+        assert f"/{c['command']}" in render.HELP_TEXT  # menu ⇄ help stay in sync
+
+
+def test_set_my_commands_registers_via_transport(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "777")
+    calls = []
+    monkeypatch.setattr(telegram, "_post_telegram",
+                        lambda tok, method, payload: calls.append((method, payload)) or {"ok": True, "result": True})
+    telegram.set_my_commands(render.bot_command_menu())
+    assert len(calls) == 1 and calls[0][0] == "setMyCommands"
+    assert calls[0][1]["commands"][0] == {"command": "today", "description": "What's safe to spend today"}
 
 
 def test_cat_shows_refs(bot):

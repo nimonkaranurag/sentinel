@@ -17,17 +17,31 @@ from . import bills, categorize, controller, db
 from .db import fmt_eur
 from .normalize import display_merchant
 
-HELP_TEXT = (
-    "Sentinel commands:\n"
-    "/today — what's safe to spend today\n"
-    "/status — this pay cycle's spend by bucket + safe-to-spend\n"
-    "/cat <name> — one category + this month's transactions (with refs)\n"
-    "/sync — pull the bank now (exempt from the daily allowance)\n"
-    "/recat <ref> <category> — correct a transaction AND its merchant\n"
-    "/date <ref> — mark one transaction as Dates (merchant untouched)\n"
-    "/paid-today [date] — log the day your salary landed (e.g. early on a "
-    "weekend/bank holiday) so the pay cycle rolls to it"
+# The bot's command menu. Telegram's setMyCommands requires names of [a-z0-9_]
+# (1–32 chars) — no hyphen — so the registered/canonical name is `paidtoday`; the
+# router still accepts the `/paid-today` spelling the docs used. This one list
+# drives BOTH the '/' autocomplete menu (bot_command_menu) and /help (HELP_TEXT),
+# so they can never drift apart.
+BOT_COMMANDS: tuple[tuple[str, str], ...] = (
+    ("today", "What's safe to spend today"),
+    ("status", "This pay cycle — spend by bucket + safe-to-spend"),
+    ("cat", "A category's transactions this month — /cat <name>"),
+    ("paidtoday", "Log the day your salary landed (early/late)"),
+    ("sync", "Pull the bank now (exempt from the daily limit)"),
+    ("recat", "Fix a category — /recat <ref> <category>"),
+    ("date", "Mark one transaction as Dates — /date <ref>"),
+    ("help", "Show this command list"),
 )
+
+HELP_TEXT = "Sentinel — your commands:\n" + "\n".join(f"/{name} — {desc}" for name, desc in BOT_COMMANDS)
+
+
+def bot_command_menu() -> list[dict[str, str]]:
+    """
+    The setMyCommands payload (the '/' autocomplete menu): one {command,
+    description} per BOT_COMMANDS entry.
+    """
+    return [{"command": name, "description": desc} for name, desc in BOT_COMMANDS]
 
 # Categories offered in the inline reclassify grid (everything but the sentinel).
 RELABEL_CHOICES = tuple(c for c in categorize.TAXONOMY if c != "Uncategorized")
