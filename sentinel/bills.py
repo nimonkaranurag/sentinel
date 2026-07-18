@@ -211,6 +211,9 @@ def send_alerts(conn, cfg: dict[str, Any], as_of: date, dry_run: bool = False, p
 
 
 def render_checklist(conn, cfg: dict[str, Any], as_of: date, path: str | Path | None = None) -> str:
+    # Resolve the registry path from config exactly like send_alerts, so the
+    # digest checklist and the alert engine can never read different registries.
+    path = path if path is not None else (cfg.get("bills") or {}).get("path")
     bills, grace = load_bills(path)
     early = _early_match_days(cfg)
     lines = ["Bills this month:"]

@@ -36,6 +36,10 @@ def make_cfg(tmp_path):
         "thresholds": {"green_cents": 2_500, "red_cents": 1_000},
         "telegram": {"poll_timeout_seconds": 50},
         "categorize": {"merchant_map_path": str(tmp_path / "merchant_map.json"), "rules_path": None},
+        # Hermetic bills registry: without a path, the default loader would merge
+        # the developer machine's REAL git-ignored bills.local.yaml into digest
+        # and poll assertions. The tmp path need not exist — it loads as empty.
+        "bills": {"path": str(tmp_path / "bills.yaml")},
         "enable_banking": {"api_daily_call_limit": 4},
     }
 

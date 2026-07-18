@@ -12,6 +12,13 @@ ln -sf ../../scripts/pre-commit "$hooks_dir/pre-commit"
 chmod +x "$root/scripts/pre-commit"
 echo "installed: .git/hooks/pre-commit -> scripts/pre-commit"
 
+# Pre-push: sync the git-ignored owner config (rules/bills local YAML) to the CD
+# repo secrets BEFORE the push triggers a deploy, so prod can never ship stale
+# owner config. The script warns-and-continues on failure; it never blocks a push.
+ln -sf ../../scripts/sync-secrets "$hooks_dir/pre-push"
+chmod +x "$root/scripts/sync-secrets"
+echo "installed: .git/hooks/pre-push -> scripts/sync-secrets"
+
 if [ -f "$root/.pii-patterns" ]; then
   # The blocklist IS a list of crown-jewel strings, so it must not be world- or
   # group-readable like .env and ledger.db already aren't. Enforce 0600.

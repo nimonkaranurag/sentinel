@@ -2,7 +2,7 @@ PY ?= uv run python
 PYTEST ?= uv run pytest
 DB ?= ledger.db
 
-.PHONY: init hooks backfill categorize relink report poll notify plan digest backup test
+.PHONY: init hooks secrets backfill categorize relink report poll notify plan digest backup test
 
 # Cron (Europe/Dublin) — see deploy/crontab.txt (simple/local) or deploy/systemd/
 # (production always-on + auto-deploy) for the real jobs.
@@ -21,8 +21,11 @@ init:
 	mkdir -p data/backfill reports backups logs
 	$(PY) -m sentinel.db --init
 
-hooks:  ## install the pre-commit hook (secrets + PII scan)
+hooks:  ## install git hooks (pre-commit PII scan; pre-push owner-config secret sync)
 	sh scripts/install-hooks.sh
+
+secrets:  ## push rules/bills.local.yaml to the CD repo secrets (auto-runs on git push)
+	sh scripts/sync-secrets
 
 backfill:
 	$(PY) -m sentinel.csv_import data/backfill/*.csv
