@@ -95,8 +95,8 @@ def do_paid_today(conn, cfg: dict[str, Any], arg: str, as_of: date) -> str:
             when = date.fromisoformat(arg)
         except ValueError:
             return (
-                f"Couldn't read {arg!r} as a date. Use /paid-today for today, or "
-                f"/paid-today YYYY-MM-DD (e.g. /paid-today {as_of.isoformat()})."
+                f"Couldn't read {arg!r} as a date. Use /paidtoday for today, or "
+                f"/paidtoday YYYY-MM-DD (e.g. /paidtoday {as_of.isoformat()})."
             )
     else:
         when = as_of
@@ -104,7 +104,7 @@ def do_paid_today(conn, cfg: dict[str, Any], arg: str, as_of: date) -> str:
     db.set_state(conn, state_keys.payday_actual(year, month), when.isoformat())
     conn.commit()
     scheduled = controller.scheduled_payday(year, month, cfg)
-    cycle_end = controller.cycle_for(conn, cfg, when)["next_payday"] - timedelta(days=1)
+    next_payday = controller.cycle_for(conn, cfg, when)["next_payday"]
     note = ""
     if when != scheduled:
         off = (scheduled - when).days
@@ -112,8 +112,8 @@ def do_paid_today(conn, cfg: dict[str, Any], arg: str, as_of: date) -> str:
         note = f" ({render.fmt_day(scheduled)} payday, {early_late})"
     return (
         f"✅ Logged payday: {render.fmt_day(when)}{note}.\n"
-        f"This pay cycle now runs {render.fmt_day(when)} → {render.fmt_day(cycle_end)} "
-        f"and resets your discretionary pool."
+        f"This pay cycle now runs {render.fmt_day(when)} → {render.fmt_day(next_payday)} "
+        f"and resets your spending budget."
     )
 
 

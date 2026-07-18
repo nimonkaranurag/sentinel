@@ -98,7 +98,7 @@ def test_paid_today_rolls_the_cycle_when_paid_early(tmp_path):
     assert before["discretionary_spent_cents"] == 70_000
 
     reply = commands.do_paid_today(conn, cfg, "", date(2026, 7, 21))  # "paid today", the 21st
-    assert "21 Jul" in reply and "2 days early" in reply and "22 Aug" in reply
+    assert "21 Jul" in reply and "2 days early" in reply and "23 Aug" in reply
     assert db.get_state(conn, state_keys.payday_actual(2026, 7)) == "2026-07-21"
 
     after = controller.safe_to_spend(conn, cfg, date(2026, 7, 22))

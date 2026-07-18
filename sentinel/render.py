@@ -64,10 +64,11 @@ def plural(n: int, word: str, plural_word: str | None = None) -> str:
 
 def fmt_day(d: date) -> str:
     """
-    Format a date for the chat surface as e.g. "Wed 23 Jul" (no leading zero,
-    locale-independent).
+    Format a date for the chat surface as "23 Jul" — no weekday, no leading zero,
+    locale-independent. Weekday names were dropped deliberately: they added no
+    information and invited "is that day-of-week right?" second-guessing.
     """
-    return f"{d.strftime('%a')} {d.day} {d.strftime('%b')}"
+    return f"{d.day} {d.strftime('%b')}"
 
 
 # ── Daily / status ──────────────────────────────────────────────────────────
@@ -84,8 +85,8 @@ def traffic_light(cfg: dict[str, Any], safe_cents: int) -> str:
 
 def _payday_line(s: dict[str, Any]) -> str:
     """
-    Return the "N days to payday (Wed 23 Jul)" clause shared by /today and
-    /status, noting when the current cycle started from a logged /paid-today.
+    Return the "N days to payday (23 Jul)" clause used by /today, noting when the
+    current cycle started from a logged /paidtoday.
     """
     days = plural(s["days_left"], "day")
     when = fmt_day(date.fromisoformat(s["next_payday"]))
@@ -119,8 +120,13 @@ def status_text(conn, cfg: dict[str, Any], as_of: date) -> str:
     """
     s = controller.safe_to_spend(conn, cfg, as_of)
     cycle_start = date.fromisoformat(s["cycle_start"])
-    early = "  ·  payday logged early" if s["cycle_start_source"] == "logged" else ""
-    lines = [f"📊 This pay cycle{early}", f"{fmt_day(cycle_start)} → {fmt_day(as_of)}  ·  {_payday_line(s)}", ""]
+    next_payday = date.fromisoformat(s["next_payday"])
+    early = ", payday logged early" if s["cycle_start_source"] == "logged" else ""
+    # The cycle is payday → next payday (e.g. 23 Jun → 23 Jul). Show THAT, not
+    # today's date, so the two dates can't look like conflicting cycle-ends.
+    window = f"{fmt_day(cycle_start)} → {fmt_day(next_payday)}"
+    header = f"📊 This pay cycle: {window} ({plural(s['days_left'], 'day')} left{early})"
+    lines = [header, ""]
 
     spent = [
         (BUCKET_LABELS.get(b, b), s["by_bucket_cents"].get(b, 0))
