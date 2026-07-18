@@ -77,7 +77,11 @@ jobs:
           # Re-apply the cascade so a rules.yaml / rules.local.yaml change lands now,
           # not only at the next poll. Atomic + preserves owner /recat labels;
           # non-fatal so a bad rules edit can't wedge the deploy or the restart.
-          uv run python -m sentinel.categorize --relink || echo "::warning::relink failed — keeping existing labels"
+          # Output stays on the HOST: the cascade logs real ledger merchant names,
+          # and this Actions log is public (SPEC §7 — no ledger data leaves the host).
+          install -d logs
+          uv run python -m sentinel.categorize --relink >> logs/relink.log 2>&1 \
+            || echo "::warning::relink failed — keeping existing labels (see logs/relink.log on the host)"
           sudo systemctl restart sentinel-listen.service
           echo "deployed $(git rev-parse --short HEAD)"
           REMOTE

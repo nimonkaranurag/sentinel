@@ -265,6 +265,63 @@ def test_manual_uncategorized_survives_cascade_and_relink(conn, tmp_path):
     assert tuple(row) == ("Uncategorized", "manual")
 
 
+def test_blob_variants_of_one_merchant_are_not_a_collision(tmp_path, caplog):
+    """
+    The EB {…} blob embeds a per-transaction timestamp, so ONE merchant yields
+    a new raw string every charge. That is normalize() doing its job — not a
+    merchant-key collision — and it must not warn: the deploy-time relink streams
+    this log into a public Actions log, so per-variant warnings sprayed 171 raw
+    ledger lines (with timestamps) per deploy.
+    """
+    connection = db.connect(tmp_path / "ledger.db")
+    db.init_db(connection)
+    db.insert_transactions(
+        connection,
+        [
+            {
+                "account_id": ACCOUNT,
+                "booking_date": f"2026-07-{day:02d}",
+                "amount_cents": -1_000,
+                "merchant_raw": f"VDP-UBR* PENDING.U {{ PAYMENTINITIATIONDATETIME : 2026-07-{day:02d}T09:00:00 }}",
+                "source": "api",
+            }
+            for day in (1, 2, 3)
+        ],
+    )
+    connection.commit()
+    with caplog.at_level("WARNING"):
+        categorize.link_transactions(connection)
+    assert "merchant-key collision" not in caplog.text
+    n = connection.execute("SELECT COUNT(*) FROM merchants").fetchone()[0]
+    assert n == 1  # all three variants link to ONE merchant
+    connection.close()
+
+
+def test_genuinely_distinct_raws_warn_collision_once(tmp_path, caplog):
+    connection = db.connect(tmp_path / "ledger.db")
+    db.init_db(connection)
+    db.insert_transactions(
+        connection,
+        [
+            {
+                "account_id": ACCOUNT,
+                "booking_date": "2026-07-01",
+                "amount_cents": -1_000,
+                "merchant_raw": raw,
+                "source": "api",
+            }
+            for raw in ("VDP-TESCO STORES 4368", "POS TESCO STORES", "VDP-TESCO STORES 4368 { BLOB : X }")
+        ],
+    )
+    connection.commit()
+    with caplog.at_level("WARNING"):
+        categorize.link_transactions(connection)
+    # Two distinct pre-blob identities → exactly one warning; the blob variant of
+    # the first identity adds nothing.
+    assert caplog.text.count("merchant-key collision") == 1
+    connection.close()
+
+
 def test_bucket_category_sets_are_derived_from_the_rollup():
     """
     FIXED/NON_SPEND must be exactly the sub-labels the bucket rollup calls

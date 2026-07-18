@@ -26,7 +26,7 @@ from typing import Any
 import yaml
 
 from . import db
-from .normalize import normalize
+from .normalize import display_merchant, normalize
 
 log = logging.getLogger(__name__)
 
@@ -191,20 +191,30 @@ def link_transactions(conn) -> int:
         "GROUP BY merchant_raw"
     ).fetchall()
     linked = 0
-    raw_for_name: dict[str, str] = {}
+    idents_for_name: dict[str, set[str]] = {}
     for row in rows:
         name = normalize(row["merchant_raw"])
         if not name:
             continue
-        if name in raw_for_name and raw_for_name[name] != row["merchant_raw"]:
+        # Collision identity is the blob-stripped display form: the Enable
+        # Banking {…} blob embeds a per-transaction timestamp, so comparing full
+        # raw strings would cry "collision" for every re-charge of one merchant
+        # (one warning per raw variant) — and spray raw ledger strings, with
+        # timestamps, into whatever log captures this run (the deploy-time
+        # relink streams into a public Actions log). Only genuinely different
+        # pre-blob names (distinct store numbers, cities, brands) are a real
+        # key collision worth flagging — and once per new variant, not per row.
+        ident = " ".join(display_merchant(row["merchant_raw"]).upper().split())
+        idents = idents_for_name.setdefault(name, set())
+        if idents and ident not in idents:
             log.warning(
                 "merchant-key collision: %r and %r both normalize to %r — policies "
                 "and labels will treat them as one merchant",
-                raw_for_name[name],
-                row["merchant_raw"],
+                sorted(idents)[0],
+                ident,
                 name,
             )
-        raw_for_name.setdefault(name, row["merchant_raw"])
+        idents.add(ident)
         conn.execute(
             "INSERT OR IGNORE INTO merchants (name_normalized, first_seen) VALUES (?, ?)",
             (name, row["first_seen"]),
