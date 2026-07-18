@@ -84,9 +84,11 @@ def bucket(category: str | None) -> str:
 # Buckets that count against the monthly discretionary pool (safe-to-spend).
 DISCRETIONARY_BUCKETS = ("Groceries", "FoodDelivery", "Other")
 
-# Category sets referenced by reports/controller.
-FIXED_CATEGORIES = ("Rent", "Utilities", "Tools", "Health/Fitness")
-NON_SPEND_CATEGORIES = ("Transfers", "Income")
+# Category sets referenced by reports — derived from _BUCKET_OF so the
+# reconciliation's "fixed" can never disagree with the Fixed bucket that
+# /status, the digest, and the month-over-month table show.
+FIXED_CATEGORIES = tuple(c for c, b in _BUCKET_OF.items() if b == "Fixed")
+NON_SPEND_CATEGORIES = tuple(c for c, b in _BUCKET_OF.items() if b in ("Income", "Transfers"))
 
 DEFAULT_RULES_PATH = Path(__file__).resolve().parent / "rules.yaml"
 DEFAULT_MERCHANT_MAP_PATH = db.REPO_ROOT / "merchant_map.json"
@@ -102,10 +104,19 @@ def _compile_rules_file(rules_path: Path) -> list[tuple[re.Pattern, str]]:
         raw = yaml.safe_load(fh) or {}
     compiled = []
     for i, entry in enumerate(raw.get("rules", [])):
+        # A malformed rules file kills every poll (categorize runs before the
+        # alert pass), so fail with the file and rule number, not a bare
+        # KeyError/AttributeError/re.error deep in a cron log.
+        if not isinstance(entry, dict) or "pattern" not in entry:
+            raise ValueError(f"{rules_path} rule #{i + 1}: each rule needs 'pattern' and 'category'")
         category = entry.get("category")
         if category not in TAXONOMY:
             raise ValueError(f"{rules_path} rule #{i + 1}: category {category!r} is not in the SPEC §3 taxonomy")
-        compiled.append((re.compile(entry["pattern"]), category))
+        try:
+            pattern = re.compile(entry["pattern"])
+        except re.error as exc:
+            raise ValueError(f"{rules_path} rule #{i + 1}: invalid regex {entry['pattern']!r}: {exc}") from None
+        compiled.append((pattern, category))
     return compiled
 
 
@@ -135,7 +146,12 @@ def load_merchant_map(path: str | Path) -> dict[str, dict[str, Any]]:
         return {}
     with open(map_path, encoding="utf-8") as fh:
         data = json.load(fh)
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        # SPEC §3 calls the map owner-written, so a hand-edit can break it; an
+        # unusable map must degrade to the rules tier loudly, not silently.
+        log.warning("%s root is %s, not an object — ignoring the merchant map", map_path, type(data).__name__)
+        return {}
+    return data
 
 
 def save_merchant_map(path: str | Path, mapping: dict[str, dict[str, Any]]) -> None:
@@ -249,6 +265,19 @@ def _apply_cascade(conn, cfg: dict[str, Any]) -> dict[str, Any]:
     rules = load_rules(cat_cfg.get("rules_path"))
     map_path = Path(cat_cfg.get("merchant_map_path") or DEFAULT_MERCHANT_MAP_PATH)
     merchant_map = load_merchant_map(map_path)
+    stale_keys = sorted(k for k in merchant_map if normalize(k) != k)
+    if stale_keys:
+        # Lookup is by exact normalized name, so a key that is not in normalized
+        # form (a hand-typed lowercase entry, or one written by an older
+        # normalizer) can never match — surface it instead of silently ignoring.
+        preview = ", ".join(repr(k) for k in stale_keys[:5])
+        log.warning(
+            "%d merchant_map key(s) are not normalized and can never match (fix or --relink after "
+            "a normalizer change): %s%s",
+            len(stale_keys),
+            preview,
+            "…" if len(stale_keys) > 5 else "",
+        )
 
     stats: dict[str, Any] = {"linked": link_transactions(conn), "by_dict": 0, "by_regex": 0, "novel_unresolved": 0}
 
@@ -261,18 +290,33 @@ def _apply_cascade(conn, cfg: dict[str, Any]) -> dict[str, Any]:
     novel: list[str] = []
     for row in pending:
         name = row["name_normalized"]
-        if name in merchant_map:  # 2. exact learned lookup
-            entry = merchant_map[name]
+        entry = merchant_map.get(name)  # 2. exact learned lookup
+        if entry is not None and not isinstance(entry, dict):
+            # One poisoned hand-edit must not crash the poll (categorize runs
+            # before every alert pass) — degrade this merchant to the rules tier.
+            log.warning("merchant_map entry for %r is not an object — ignoring it", name)
+            entry = None
+        if entry is not None:
             category = entry.get("category", "Uncategorized")
-            if category in TAXONOMY and category != "Uncategorized":
-                # Honor the map entry's provenance: an owner /recat writes
-                # by='manual', and that must survive a --relink rebuild, not be
-                # flattened to 'dict'. Unknown values fall back to 'dict'.
-                by = entry.get("by")
-                by = by if by in ("dict", "manual", "regex") else "dict"
+            # Honor the map entry's provenance: an owner /recat writes
+            # by='manual', and that must survive a --relink rebuild, not be
+            # flattened to 'dict'. Unknown values fall back to 'dict'.
+            by = entry.get("by")
+            by = by if by in ("dict", "manual", "regex") else "dict"
+            # A manual 'Uncategorized' is an explicit unlabel (typed
+            # /recat <ref> uncategorized): apply it so the rules tier — and a
+            # future --relink — cannot override the owner's decision.
+            if category in TAXONOMY and (category != "Uncategorized" or by == "manual"):
                 _set_merchant_category(conn, name, category, by, entry.get("confidence"))
                 stats["by_dict"] += 1
                 continue
+            if category not in TAXONOMY:
+                log.warning(
+                    "merchant_map entry for %r has category %r, not in the SPEC §3 taxonomy — "
+                    "falling through to the rules tier",
+                    name,
+                    category,
+                )
         category = match_rules(rules, name)  # 3. seed regex rules
         if category:
             _set_merchant_category(conn, name, category, "regex", 1.0)
@@ -312,12 +356,15 @@ def run(conn, cfg: dict[str, Any], dry_run: bool = False, as_of: date | None = N
     """
     as_of = as_of or datetime.now(db.TZ).date()
     stats = _apply_cascade(conn, cfg)
+    # Read coverage before commit/rollback (as relink does), so a --dry-run
+    # reports the coverage the run WOULD produce, not the pre-run state.
+    result = _log_cascade(conn, cfg, as_of, stats)
     if dry_run:
         conn.rollback()
         log.info("dry-run: rolled back all categorization writes")
     else:
         conn.commit()
-    return _log_cascade(conn, cfg, as_of, stats)
+    return result
 
 
 def relink(conn, cfg: dict[str, Any], as_of: date | None = None, dry_run: bool = False) -> dict[str, Any]:

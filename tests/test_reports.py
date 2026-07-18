@@ -7,8 +7,10 @@ from sentinel import db, reports
 AS_OF = date(2026, 7, 14)  # window: 2026-04-15 → 2026-07-14
 TARGET_RESIDUAL = 12_000  # €120 engineered residual for full months
 FULL_MONTH_INFLOWS = 430_000  # salary 3300 + family transfer 1000
-FULL_MONTH_FIXED = 169_100  # rent + utilities + tools + bjj
-FULL_MONTH_VARIABLE = FULL_MONTH_INFLOWS - FULL_MONTH_FIXED - TARGET_RESIDUAL  # 248,900
+# rent + utilities + tools + bjj + netflix — FIXED_CATEGORIES is derived from the
+# bucket rollup, where Subscriptions (and Fees) are Fixed.
+FULL_MONTH_FIXED = 170_899
+FULL_MONTH_VARIABLE = FULL_MONTH_INFLOWS - FULL_MONTH_FIXED - TARGET_RESIDUAL  # 247,101
 COFFEE_TXNS = 19  # 8 (May) + 8 (Jun) + 3 (Jul) — the only <€5 spend
 
 MERCHANTS = {
@@ -89,7 +91,7 @@ def build_ledger(conn):
         txn(d(random_day), "RANDOM BAZAAR", random_cents)
         laundrette_month = sum(1_200 for x in _laundrette_dates() if x.month == month)
         base_variable = (
-            1_799 + 6 * 4_500 + 8 * 350 + 3 * 1_850 + 2 * 2_000 + 6_000 + 9_900 + abs(random_cents) + laundrette_month
+            6 * 4_500 + 8 * 350 + 3 * 1_850 + 2 * 2_000 + 6_000 + 9_900 + abs(random_cents) + laundrette_month
         )
         txn(d(20), "BALANCER SHOP", -(FULL_MONTH_VARIABLE - base_variable))
 
@@ -262,6 +264,48 @@ def test_dry_run_writes_nothing(tmp_path):
     assert data["months"], "computation still happens on dry-run"
     assert data["files"] == []
     assert not (tmp_path / "reports").exists()
+    conn.close()
+
+
+def test_month_over_month_nets_refunds_and_holds_out_unlabeled_inflows(tmp_path):
+    """
+    MoM must use the SAME netted per-bucket metric as /status and the digest
+    (controller.spend_by_bucket): a refund offsets its purchase, and a large
+    Uncategorized inflow is held out rather than flattering its month.
+    """
+    conn = db.connect(tmp_path / "ledger.db")
+    db.init_db(conn)
+    cur = conn.execute(
+        "INSERT INTO merchants (name_normalized, category, categorized_by) VALUES ('TESCO', 'Groceries', 'dict')"
+    )
+    mid = cur.lastrowid
+
+    def txn(day, cents, merchant_id=None, raw="MYSTERY POS"):
+        return {
+            "account_id": "a",
+            "booking_date": day,
+            "amount_cents": cents,
+            "merchant_raw": raw,
+            "merchant_id": merchant_id,
+            "source": "api",
+        }
+
+    db.insert_transactions(
+        conn,
+        [
+            txn("2026-05-05", -10_000, mid, "TESCO"),  # May groceries €100…
+            txn("2026-05-08", 2_000, mid, "TESCO"),  # …of which €20 refunded → €80 net
+            txn("2026-05-09", 50_000),  # unlabeled €500 inflow — must NOT net
+            txn("2026-05-10", -3_000),  # €30 uncategorized spend (Other bucket)
+            txn("2026-06-05", -5_000, mid, "TESCO"),  # June groceries €50
+        ],
+    )
+    conn.commit()
+    mom = reports.month_over_month(conn, date(2026, 7, 14), inflow_exclude_cents=10_000)
+    assert (mom["prev"], mom["curr"]) == ("2026-05", "2026-06")
+    got = {r["bucket"]: (r["prev_cents"], r["curr_cents"]) for r in mom["rows"]}
+    assert got["Groceries"] == (8_000, 5_000), "refund netted against its purchase"
+    assert got["Other"] == (3_000, 0), "€500 unlabeled inflow held out; the €30 spend kept"
     conn.close()
 
 
