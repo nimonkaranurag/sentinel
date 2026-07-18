@@ -16,7 +16,9 @@ The weekly report renders the checklist.
 
 Each bill is schema-checked at load (name, pattern, due_day, expected_cents,
 tolerance_pct); a missing or unknown key, or an out-of-range value, raises rather
-than defaulting silently.
+than defaulting silently. `pattern` is a regex over the NORMALIZED merchant name
+— the same surface rules.yaml and policy `pattern` matchers see (see
+_cycle_match).
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ import yaml
 
 from . import db, state_keys, telegram
 from .db import fmt_eur
+from .normalize import normalize
 
 log = logging.getLogger(__name__)
 
@@ -140,7 +143,7 @@ def _cycle_match(conn, bill: dict[str, Any], due: date, as_of: date, early_days:
         "ORDER BY booking_date DESC",
         (start, as_of.isoformat()),
     ).fetchall():
-        if bill["_re"].search((row["merchant_raw"] or "").upper()):
+        if bill["_re"].search(normalize(row["merchant_raw"])):
             return row
     return None
 
