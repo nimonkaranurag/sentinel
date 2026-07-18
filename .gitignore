@@ -7,6 +7,7 @@ bills.local.yaml
 
 # Review / diagnosis docs quote personal figures and names
 CODE-REVIEW.md
+docs/DEPLOY.md
 
 # Pre-commit PII blocklist — the list of identifiers IS itself sensitive.
 # Only .pii-patterns.example (placeholders) is committed. See scripts/pre-commit.

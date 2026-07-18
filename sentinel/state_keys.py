@@ -38,6 +38,19 @@ ALERTS_CHECKED_THROUGH = "alerts_checked_through"
 TG_UPDATE_OFFSET = "tg_update_offset"
 
 
+def payday_actual(year: int, month: int) -> str:
+    """
+    Return the state key for a logged actual payday, overriding the scheduled
+    day-of-month for that one cycle (Europe/Dublin YYYY-MM).
+
+    Written by the /paid-today command when the bank pays early (a weekend or
+    bank holiday) or late. `controller.cycle_for` reads it in place of the
+    nominal payday, so the pay cycle rolls to the real date without Sentinel
+    maintaining any holiday calendar.
+    """
+    return f"payday_actual:{year}-{month:02d}"
+
+
 def api_calls(day_iso: str) -> str:
     """
     Return the state key for the per-day unattended API-allowance counter

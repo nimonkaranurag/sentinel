@@ -89,11 +89,20 @@ reports:
     weekly_days: [6, 8]
     mad_max_days: 3
 
+payday:
+  # Safe-to-spend is anchored to your PAY CYCLE, not the calendar month: the
+  # discretionary pool resets on payday and the daily number counts down to the
+  # next payday. This is the nominal day of the month your salary lands.
+  day_of_month: 23
+  # Sentinel keeps NO holiday calendar and does no weekend/bank-holiday maths. If
+  # the bank pays you early (23rd on a weekend/holiday) or late, log the real day
+  # with the /paid-today command and the cycle rolls to that date for that month.
+
 budgets:
-  # The monthly discretionary pool (Groceries + FoodDelivery + Other). Set once
+  # The per-cycle discretionary pool (Groceries + FoodDelivery + Other). Set once
   # by hand from your history / your target; safe-to-spend = what's left of this
-  # spread over the days remaining. Integer cents.
-  pool_monthly_cents: 120000   # €1,200/mo — TUNE to your target
+  # spread over the days until your next payday. Integer cents.
+  pool_monthly_cents: 120000   # €1,200/cycle — TUNE to your target
 
 controller:
   graduation_surplus_cents: 100000    # €1,000 surplus/mo target — one report line

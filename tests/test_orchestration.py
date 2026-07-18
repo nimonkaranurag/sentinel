@@ -120,7 +120,7 @@ def test_sync_categorizes_and_alerts(env, monkeypatch, tmp_path):
     monkeypatch.setattr(commands.ingest, "run_ingest", fake_run_ingest)
     monkeypatch.setattr(commands.ingest, "build_client", lambda *a, **k: object())
     reply = commands.do_sync(conn, cfg)
-    assert "1 alert" in reply and "attended" in reply
+    assert "1 new alert" in reply and "Bank sync done" in reply
     assert len(fake.sent) == 1
 
 

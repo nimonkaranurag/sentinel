@@ -85,26 +85,32 @@ Fine **sub-labels** (Dining, Coffee/Snacks, Subscriptions, …) roll up via
    tolerance = price hike), each guarded by a per-cycle `state` key so one late
    bill sends one message per cycle, not one per poll; also rendered in the weekly
    report.
-4. **Safe-to-spend** (`controller.py`). `safe_today = max(0, (pool_monthly_cents
-   − MTD discretionary) ÷ days_left)`. The pool is a config number; underspend
-   rolls forward, overspend drags it down. Small refunds net against spend; a
-   large unlabeled inflow (an unmapped transfer) is held out of the pool until
-   labeled, so it can't inflate the number.
+4. **Safe-to-spend** (`controller.py`). Anchored to the owner's **pay cycle**,
+   not the calendar month: the pool resets on payday and the number is what's
+   left spread over the days to the *next* payday. `safe_today = max(0,
+   (pool_monthly_cents − cycle-to-date discretionary) ÷ days_to_next_payday)`.
+   Payday is a nominal day-of-month (`payday.day_of_month`, default 23); Sentinel
+   keeps **no holiday calendar**, so when the bank pays early (a weekend/bank
+   holiday) or late the owner logs the real day with `/paid-today`, which writes
+   a per-cycle override that rolls the cycle. The pool is a config number;
+   underspend rolls forward, overspend drags it down. Small refunds net against
+   spend; a large unlabeled inflow (an unmapped transfer) is held out of the pool
+   until labeled, so it can't inflate the number.
 5. **Pushes + monthly report.** Daily 08:00 safe-to-spend (traffic light,
    idempotent), Monday plan (`--plan`), deterministic weekly digest (`--digest`,
    week vs prior + surplus line + bills checklist), and monthly `EXPENSE_REPORT.md`
    (`reports.py`: Paretos, size bands, reconciliation, and month-over-month
    bucket deltas + `subscriptions.md` + charts).
 
-Commands (owner chat only): `/today /status /cat /sync /recat /date`.
+Commands (owner chat only): `/today /status /cat /sync /recat /date /paid-today`.
 
 ---
 
 ## 5. Data model
 
 `transactions` · `merchants` · `state` (cursors, consent expiry, per-day API
-counter, the alert watermark, per-cycle bill-alert keys, idempotency keys — key
-formats in `state_keys.py`) · `events` + `processed_callbacks` (relabel loop) ·
+counter, the alert watermark, per-cycle bill-alert keys, per-cycle logged-payday
+overrides, idempotency keys — key formats in `state_keys.py`) · `events` + `processed_callbacks` (relabel loop) ·
 `quarantine` (rows that cannot be booked — non-EUR, sign-ambiguous, malformed —
 kept with the raw row + reason, deduped by fingerprint, surfaced in `/status`;
 migration 006). No `budgets`, `llm_calls`, envelope, or graduation tables (v1
