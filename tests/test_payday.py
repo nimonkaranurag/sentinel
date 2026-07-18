@@ -160,7 +160,8 @@ def test_today_and_status_read_cleanly(tmp_path):
     _spend(conn, "Groceries", "TESCO", [("2026-07-15", -40_000)])
     today = render.compose_daily(conn, cfg, date(2026, 7, 18))
     assert today.startswith("Safe to spend today: €")
-    assert "to payday" in today and "Pool €1,200.00" in today
+    assert "to payday" in today and "€1,200.00 budget" in today
+    assert "pool" not in today.lower(), "no jargon in the bot text"
     status = render.status_text(conn, cfg, date(2026, 7, 18))
     assert status.startswith("📊 This pay cycle")
     assert "Groceries" in status and "Safe to spend today: €" in status
