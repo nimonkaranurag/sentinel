@@ -64,8 +64,11 @@ def test_valid_until_without_bank_limit_uses_config():
 
 def test_build_auth_request_shape():
     body = build_auth_request(
-        "2026-07-15T12:00:00Z", {"name": "AIB", "country": "IE"},
-        "https://localhost:8080/callback", "personal", "st8",
+        "2026-07-15T12:00:00Z",
+        {"name": "AIB", "country": "IE"},
+        "https://localhost:8080/callback",
+        "personal",
+        "st8",
     )
     assert body == {
         "access": {"valid_until": "2026-07-15T12:00:00Z"},
@@ -111,10 +114,7 @@ def test_extract_code_rejects_bare_code_when_state_expected():
 
 def test_extract_code_surfaces_error_redirect():
     with pytest.raises(ValueError, match="refused"):
-        extract_code(
-            "https://localhost:8080/callback?error=access_denied"
-            "&error_description=user%20cancelled"
-        )
+        extract_code("https://localhost:8080/callback?error=access_denied&error_description=user%20cancelled")
 
 
 def test_extract_code_missing_code():

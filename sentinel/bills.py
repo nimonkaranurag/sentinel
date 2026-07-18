@@ -98,8 +98,9 @@ def _validate_bill(p: Path, i: int, b: dict[str, Any]) -> None:
         raise ValueError(f"{p} bill #{i} ({name}): due_day must be an integer 1–31, got {due!r}")
     exp = b["expected_cents"]
     if not isinstance(exp, int) or isinstance(exp, bool) or exp <= 0:
-        raise ValueError(f"{p} bill #{i} ({name}): expected_cents must be a positive integer "
-                         f"(cents, not '12e2'), got {exp!r}")
+        raise ValueError(
+            f"{p} bill #{i} ({name}): expected_cents must be a positive integer (cents, not '12e2'), got {exp!r}"
+        )
     tol = b["tolerance_pct"]
     if not isinstance(tol, int) or isinstance(tol, bool) or not 0 <= tol <= 100:
         raise ValueError(f"{p} bill #{i} ({name}): tolerance_pct must be an integer 0–100, got {tol!r}")
@@ -136,15 +137,15 @@ def _cycle_match(conn, bill: dict[str, Any], due: date, as_of: date, early_days:
     for row in conn.execute(
         "SELECT booking_date, merchant_raw, amount_cents FROM transactions "
         "WHERE amount_cents < 0 AND booking_date >= ? AND booking_date <= ? "
-        "ORDER BY booking_date DESC", (start, as_of.isoformat()),
+        "ORDER BY booking_date DESC",
+        (start, as_of.isoformat()),
     ).fetchall():
         if bill["_re"].search((row["merchant_raw"] or "").upper()):
             return row
     return None
 
 
-def check(conn, cfg: dict[str, Any], as_of: date,
-          path: str | Path | None = None) -> list[dict[str, Any]]:
+def check(conn, cfg: dict[str, Any], as_of: date, path: str | Path | None = None) -> list[dict[str, Any]]:
     bills, grace = load_bills(path)
     early = _early_match_days(cfg)
     alerts = []
@@ -156,20 +157,31 @@ def check(conn, cfg: dict[str, Any], as_of: date,
             lo = b["expected_cents"] * (100 - b["tolerance_pct"]) // 100
             hi = b["expected_cents"] * (100 + b["tolerance_pct"]) // 100
             if not lo <= amt <= hi:
-                alerts.append({"bill": b["name"], "kind": "drift", "due": due.isoformat(), "text":
-                    f"⚠️ {b['name']} was {fmt_eur(amt)}, expected ~{fmt_eur(b['expected_cents'])} "
-                    f"(±{b['tolerance_pct']}%) — price change?"})
+                alerts.append(
+                    {
+                        "bill": b["name"],
+                        "kind": "drift",
+                        "due": due.isoformat(),
+                        "text": f"⚠️ {b['name']} was {fmt_eur(amt)}, expected ~{fmt_eur(b['expected_cents'])} "
+                        f"(±{b['tolerance_pct']}%) — price change?",
+                    }
+                )
         else:
             days_late = (as_of - due).days
             if days_late > grace:
-                alerts.append({"bill": b["name"], "kind": "late", "due": due.isoformat(), "text":
-                    f"🔴 {b['name']} unpaid — {days_late} days past due ({due.isoformat()}). "
-                    "Bounced direct debit?"})
+                alerts.append(
+                    {
+                        "bill": b["name"],
+                        "kind": "late",
+                        "due": due.isoformat(),
+                        "text": f"🔴 {b['name']} unpaid — {days_late} days past due ({due.isoformat()}). "
+                        "Bounced direct debit?",
+                    }
+                )
     return alerts
 
 
-def send_alerts(conn, cfg: dict[str, Any], as_of: date, dry_run: bool = False,
-                path: str | Path | None = None) -> int:
+def send_alerts(conn, cfg: dict[str, Any], as_of: date, dry_run: bool = False, path: str | Path | None = None) -> int:
     """
     Fire the late/drift alerts for the current cycle through the Telegram seam,
     idempotently. Returns the number sent.
@@ -195,8 +207,7 @@ def send_alerts(conn, cfg: dict[str, Any], as_of: date, dry_run: bool = False,
     return sent
 
 
-def render_checklist(conn, cfg: dict[str, Any], as_of: date,
-                     path: str | Path | None = None) -> str:
+def render_checklist(conn, cfg: dict[str, Any], as_of: date, path: str | Path | None = None) -> str:
     bills, grace = load_bills(path)
     early = _early_match_days(cfg)
     lines = ["Bills this month:"]
@@ -204,8 +215,7 @@ def render_checklist(conn, cfg: dict[str, Any], as_of: date,
         due = current_due(as_of, b["due_day"])
         row = _cycle_match(conn, b, due, as_of, early)
         if row is not None:
-            lines.append(f"  ✅ {b['name']} {fmt_eur(-row['amount_cents'])} "
-                         f"(paid {row['booking_date']})")
+            lines.append(f"  ✅ {b['name']} {fmt_eur(-row['amount_cents'])} (paid {row['booking_date']})")
         elif (as_of - due).days > grace:
             lines.append(f"  🔴 {b['name']} — overdue since {due.isoformat()}")
         else:

@@ -24,7 +24,7 @@ class _Resp:
 @pytest.fixture()
 def no_jwt(monkeypatch):
     monkeypatch.setattr(ingest, "make_jwt", lambda *a, **k: "fake-jwt")  # no openssl
-    monkeypatch.setattr(ingest.time, "sleep", lambda s: None)           # no real backoff
+    monkeypatch.setattr(ingest.time, "sleep", lambda s: None)  # no real backoff
 
 
 def test_client_retries_a_transient_5xx_then_succeeds(monkeypatch, no_jwt):
@@ -92,8 +92,9 @@ def test_client_follows_pagination(monkeypatch, no_jwt):
 
 def test_client_page_cap_stops_a_runaway_continuation(monkeypatch, no_jwt):
     # every page returns a continuation_key → must stop at max_pages, not loop
-    monkeypatch.setattr(ingest.requests, "get",
-                        lambda url, **kw: _Resp({"transactions": [{"id": 1}], "continuation_key": "k"}))
+    monkeypatch.setattr(
+        ingest.requests, "get", lambda url, **kw: _Resp({"transactions": [{"id": 1}], "continuation_key": "k"})
+    )
     client = ingest.EnableBankingClient("app", "/k", max_pages=4)
     assert len(list(client.iter_transactions("uid", "2026-01-01"))) == 4
 
@@ -108,15 +109,17 @@ def test_local_ip_returns_an_address():
 
 def _cfg(tmp_path, extra=""):
     p = tmp_path / "config.yaml"
-    p.write_text(textwrap.dedent(f"""
-        db_path: {tmp_path / 'ledger.db'}
+    p.write_text(
+        textwrap.dedent(f"""
+        db_path: {tmp_path / "ledger.db"}
         currency: EUR
         budgets: {{pool_monthly_cents: 120000}}
         controller: {{graduation_surplus_cents: 100000}}
         thresholds: {{green_cents: 2500, red_cents: 1000}}
-        categorize: {{merchant_map_path: {tmp_path / 'merchant_map.json'}, rules_path: null}}
+        categorize: {{merchant_map_path: {tmp_path / "merchant_map.json"}, rules_path: null}}
         {extra}
-    """))
+    """)
+    )
     return p
 
 
@@ -169,8 +172,7 @@ def test_controller_cli_logs_the_number(tmp_path):
 
 
 def test_authorize_dry_run_previews_without_writing(tmp_path, monkeypatch):
-    monkeypatch.setattr(authorize, "get_aspsps",
-                        lambda *a, **k: [{"name": "AIB", "country": "IE"}])
+    monkeypatch.setattr(authorize, "get_aspsps", lambda *a, **k: [{"name": "AIB", "country": "IE"}])
     monkeypatch.setenv("ENABLE_BANKING_APP_ID", "app")
     key = tmp_path / "k.pem"
     key.write_text("x")

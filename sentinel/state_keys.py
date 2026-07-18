@@ -11,10 +11,10 @@ contents.
 from __future__ import annotations
 
 # ── Enable Banking consent / session (authorize writes; ingest/notify read) ──
-EB_ACCOUNT_UIDS = "eb_account_uids"      # JSON list of account uids to pull
+EB_ACCOUNT_UIDS = "eb_account_uids"  # JSON list of account uids to pull
 EB_SESSION_ID = "eb_session_id"
-EB_ASPSP = "eb_aspsp"                     # JSON {"name", "country"}
-CONSENT_EXPIRY = "consent_expiry"        # ISO date the consent dies
+EB_ASPSP = "eb_aspsp"  # JSON {"name", "country"}
+CONSENT_EXPIRY = "consent_expiry"  # ISO date the consent dies
 CONSENT_WARNED_ON = "consent_warned_on"  # ISO date of the last expiry nag (once/day)
 CONSENT_ERROR_NOTIFIED_ON = "consent_error_notified_on"  # ISO date the bank last 401/403'd us (once/day)
 # ISO date the API's coverage window begins (the first pull's date_from). The CSV

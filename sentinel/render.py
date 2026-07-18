@@ -90,10 +90,11 @@ def compose_daily(conn, cfg: dict[str, Any], as_of: date) -> str:
         pool_status = f"{fmt_eur(remaining)} left in your pool · {_payday_line(s)}"
     else:
         pool_status = f"⚠️ {fmt_eur(-remaining)} over your pool · {_payday_line(s)}"
-    spent_line = (f"Pool {fmt_eur(s['pool_cents'])} · {fmt_eur(s['discretionary_spent_cents'])} "
-                  f"spent since {fmt_day(date.fromisoformat(s['cycle_start']))}")
-    return (f"Safe to spend today: {fmt_eur(s['safe_today_cents'])}  {badge}\n\n"
-            f"{pool_status}\n{spent_line}")
+    spent_line = (
+        f"Pool {fmt_eur(s['pool_cents'])} · {fmt_eur(s['discretionary_spent_cents'])} "
+        f"spent since {fmt_day(date.fromisoformat(s['cycle_start']))}"
+    )
+    return f"Safe to spend today: {fmt_eur(s['safe_today_cents'])}  {badge}\n\n{pool_status}\n{spent_line}"
 
 
 def status_text(conn, cfg: dict[str, Any], as_of: date) -> str:
@@ -104,11 +105,13 @@ def status_text(conn, cfg: dict[str, Any], as_of: date) -> str:
     s = controller.safe_to_spend(conn, cfg, as_of)
     cycle_start = date.fromisoformat(s["cycle_start"])
     early = "  ·  payday logged early" if s["cycle_start_source"] == "logged" else ""
-    lines = [f"📊 This pay cycle{early}",
-             f"{fmt_day(cycle_start)} → {fmt_day(as_of)}  ·  {_payday_line(s)}", ""]
+    lines = [f"📊 This pay cycle{early}", f"{fmt_day(cycle_start)} → {fmt_day(as_of)}  ·  {_payday_line(s)}", ""]
 
-    spent = [(BUCKET_LABELS.get(b, b), s["by_bucket_cents"].get(b, 0))
-             for b in categorize.BUCKETS if s["by_bucket_cents"].get(b, 0)]
+    spent = [
+        (BUCKET_LABELS.get(b, b), s["by_bucket_cents"].get(b, 0))
+        for b in categorize.BUCKETS
+        if s["by_bucket_cents"].get(b, 0)
+    ]
     if spent:
         width = max(len(label) for label, _ in spent)
         lines.append("Spent this cycle:")
@@ -116,23 +119,27 @@ def status_text(conn, cfg: dict[str, Any], as_of: date) -> str:
         lines.append("")
 
     remaining = s["remaining_cents"]
-    tail = (f"{fmt_eur(remaining)} left" if remaining >= 0
-            else f"⚠️ {fmt_eur(-remaining)} over")
-    lines.append(f"Discretionary pool: {fmt_eur(s['discretionary_spent_cents'])} spent of "
-                 f"{fmt_eur(s['pool_cents'])} — {tail}")
+    tail = f"{fmt_eur(remaining)} left" if remaining >= 0 else f"⚠️ {fmt_eur(-remaining)} over"
+    lines.append(
+        f"Discretionary pool: {fmt_eur(s['discretionary_spent_cents'])} spent of {fmt_eur(s['pool_cents'])} — {tail}"
+    )
 
     if s.get("unlabeled_inflow_count"):
-        lines += ["",
-                  f"⚠️ {fmt_eur(s['unlabeled_inflow_cents'])} unlabeled inflow "
-                  f"({s['unlabeled_inflow_count']}) is held out of the pool.",
-                  "   /recat it to Income/Transfers, or to its merchant category if it's a refund."]
+        lines += [
+            "",
+            f"⚠️ {fmt_eur(s['unlabeled_inflow_cents'])} unlabeled inflow "
+            f"({s['unlabeled_inflow_count']}) is held out of the pool.",
+            "   /recat it to Income/Transfers, or to its merchant category if it's a refund.",
+        ]
     quarantined = db.quarantine_count(conn)
     if quarantined:
-        lines += ["", f"⚠️ {plural(quarantined, 'row')} quarantined (non-EUR or "
-                  "sign-ambiguous) — not counted in any total; see the ingest log."]
+        lines += [
+            "",
+            f"⚠️ {plural(quarantined, 'row')} quarantined (non-EUR or "
+            "sign-ambiguous) — not counted in any total; see the ingest log.",
+        ]
 
-    lines += ["", f"Safe to spend today: {fmt_eur(s['safe_today_cents'])}  "
-              f"{traffic_light(cfg, s['safe_today_cents'])}"]
+    lines += ["", f"Safe to spend today: {fmt_eur(s['safe_today_cents'])}  {traffic_light(cfg, s['safe_today_cents'])}"]
     return "\n".join(lines)
 
 
@@ -142,13 +149,10 @@ def sync_reply(inserted: int, submitted: int, fired: int) -> str:
     how many the bank returned) and how many alerts fired.
     """
     if inserted:
-        lines = ["✅ Bank sync done.",
-                 f"• {plural(inserted, 'new transaction')} (checked {submitted})"]
+        lines = ["✅ Bank sync done.", f"• {plural(inserted, 'new transaction')} (checked {submitted})"]
     else:
-        lines = ["✅ Bank sync done — you're already up to date.",
-                 f"• No new transactions (checked {submitted})"]
-    lines.append(f"• {plural(fired, 'new alert')} — see above ⬆️" if fired
-                 else "• No new alerts.")
+        lines = ["✅ Bank sync done — you're already up to date.", f"• No new transactions (checked {submitted})"]
+    lines.append(f"• {plural(fired, 'new alert')} — see above ⬆️" if fired else "• No new alerts.")
     return "\n".join(lines)
 
 
@@ -180,8 +184,11 @@ def cat_text(conn, cfg: dict[str, Any], name: str, as_of: date) -> str:
         (cat, month_start.isoformat(), as_of.isoformat()),
     ).fetchone()[0]
     lines = [f"{cat} ({categorize.bucket(cat)}): {fmt_eur(total)} this month"]
-    lines += [f"{r['id'][:8]} · {r['booking_date']} · {display_merchant(r['merchant_raw']) or '—'} · "
-              f"{fmt_eur(-r['amount_cents'])}" for r in rows]
+    lines += [
+        f"{r['id'][:8]} · {r['booking_date']} · {display_merchant(r['merchant_raw']) or '—'} · "
+        f"{fmt_eur(-r['amount_cents'])}"
+        for r in rows
+    ]
     lines.append("(use the 8-char ref with /recat or /date)" if rows else "No transactions this month.")
     return "\n".join(lines)
 
@@ -191,13 +198,16 @@ def cat_text(conn, cfg: dict[str, Any], name: str, as_of: date) -> str:
 
 def alert_keyboard(txn_id: str) -> dict[str, Any]:
     ref = txn_id[:12]
-    return {"inline_keyboard": [[{"text": "✓ fine", "callback_data": f"ok:{ref}"},
-                                 {"text": "Reclassify…", "callback_data": f"rc:{ref}"}]]}
+    return {
+        "inline_keyboard": [
+            [{"text": "✓ fine", "callback_data": f"ok:{ref}"}, {"text": "Reclassify…", "callback_data": f"rc:{ref}"}]
+        ]
+    }
 
 
 def reclass_keyboard(ref: str) -> dict[str, Any]:
     btns = [{"text": c, "callback_data": f"set:{ref}:{c}"} for c in RELABEL_CHOICES]
-    return {"inline_keyboard": [btns[i:i + 3] for i in range(0, len(btns), 3)]}
+    return {"inline_keyboard": [btns[i : i + 3] for i in range(0, len(btns), 3)]}
 
 
 # ── Weekly plan + digest ────────────────────────────────────────────────────
@@ -211,8 +221,10 @@ def compose_weekly_plan(conn, cfg: dict[str, Any], as_of: date) -> str:
     s = controller.safe_to_spend(conn, cfg, as_of)
     weeks_left = max(1, (s["days_left"] + 6) // 7)
     week_budget = max(0, s["remaining_cents"] // weeks_left)
-    return (f"🗓️ This week: {fmt_eur(week_budget)} discretionary "
-            f"({fmt_eur(s['remaining_cents'])} of your pool left, {s['days_left']} days).")
+    return (
+        f"🗓️ This week: {fmt_eur(week_budget)} discretionary "
+        f"({fmt_eur(s['remaining_cents'])} of your pool left, {s['days_left']} days)."
+    )
 
 
 def build_digest_aggregates(conn, cfg: dict[str, Any], as_of: date) -> dict[str, Any]:
@@ -233,13 +245,12 @@ def build_digest_aggregates(conn, cfg: dict[str, Any], as_of: date) -> dict[str,
     ).fetchall()
     status = controller.safe_to_spend(conn, cfg, as_of)
     return {
-        "week": {"start": week_start.isoformat(), "end": as_of.isoformat(),
-                 "spend_by_bucket_cents": week},
+        "week": {"start": week_start.isoformat(), "end": as_of.isoformat(), "spend_by_bucket_cents": week},
         "previous_week_spend_by_bucket_cents": prev,
-        "delta_by_bucket_cents": {b: week.get(b, 0) - prev.get(b, 0)
-                                  for b in sorted(set(week) | set(prev))},
-        "top_3_largest_spends": [{"merchant": r["merchant_raw"], "category": r["category"],
-                                  "amount_cents": r["spend_cents"]} for r in top],
+        "delta_by_bucket_cents": {b: week.get(b, 0) - prev.get(b, 0) for b in sorted(set(week) | set(prev))},
+        "top_3_largest_spends": [
+            {"merchant": r["merchant_raw"], "category": r["category"], "amount_cents": r["spend_cents"]} for r in top
+        ],
         "safe_to_spend_today_cents": status["safe_today_cents"],
         "discretionary_spent_cents": status["discretionary_spent_cents"],
         "pool_cents": status["pool_cents"],
@@ -252,10 +263,11 @@ def _digest_extras(aggregates: dict[str, Any]) -> list[str]:
     Return the graduation-surplus line for the digest.
     """
     grad = aggregates["graduation"]
-    verdict = ("🎓 above target — the family transfer can start winding down"
-               if grad["met"] else "below target")
-    return [f"Last month ({grad['month']}) surplus: {fmt_eur(grad['surplus_cents'])} "
-            f"(target {fmt_eur(grad['target_cents'])}) — {verdict}"]
+    verdict = "🎓 above target — the family transfer can start winding down" if grad["met"] else "below target"
+    return [
+        f"Last month ({grad['month']}) surplus: {fmt_eur(grad['surplus_cents'])} "
+        f"(target {fmt_eur(grad['target_cents'])}) — {verdict}"
+    ]
 
 
 def render_digest(aggregates: dict[str, Any], extras: list[str]) -> str:
@@ -268,15 +280,19 @@ def render_digest(aggregates: dict[str, Any], extras: list[str]) -> str:
     week_spend = sum(v for v in week.values() if v > 0)
     delta = week_spend - sum(v for v in prev.values() if v > 0)
     arrow = "▲" if delta > 0 else ("▼" if delta < 0 else "▬")
-    lines = [f"📊 Week {wk['start']} — {wk['end']}",
-             f"Spent {fmt_eur(week_spend)}  ({arrow} {fmt_eur(abs(delta))} vs prior week)"]
+    lines = [
+        f"📊 Week {wk['start']} — {wk['end']}",
+        f"Spent {fmt_eur(week_spend)}  ({arrow} {fmt_eur(abs(delta))} vs prior week)",
+    ]
     for b, d in sorted(aggregates["delta_by_bucket_cents"].items(), key=lambda kv: -abs(kv[1]))[:3]:
         if d:
             lines.append(f"  {b}: {'+' if d > 0 else '−'}{fmt_eur(abs(d))}")
     if aggregates["top_3_largest_spends"]:
         lines.append("Top spends:")
-        lines += [f"  {fmt_eur(s['amount_cents'])} · {display_merchant(s['merchant']) or '—'} ({s['category']})"
-                  for s in aggregates["top_3_largest_spends"]]
+        lines += [
+            f"  {fmt_eur(s['amount_cents'])} · {display_merchant(s['merchant']) or '—'} ({s['category']})"
+            for s in aggregates["top_3_largest_spends"]
+        ]
     lines.append(f"Safe to spend today: {fmt_eur(aggregates['safe_to_spend_today_cents'])}")
     if extras:
         lines.append("")

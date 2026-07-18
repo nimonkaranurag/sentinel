@@ -42,13 +42,16 @@ def send_policy_alert(conn, alert: dict[str, Any]) -> int | None:
     audit trail and in-place edits.
     """
     _, chat_id = telegram.credentials()
-    body = telegram.post("sendMessage",
-                         {"chat_id": chat_id, "text": alert["text"],
-                          "reply_markup": render.alert_keyboard(alert["txn_id"])})
+    body = telegram.post(
+        "sendMessage",
+        {"chat_id": chat_id, "text": alert["text"], "reply_markup": render.alert_keyboard(alert["txn_id"])},
+    )
     message_id = (body.get("result") or {}).get("message_id")
-    conn.execute("INSERT INTO events (kind, txn_id, message_id, status, detail, created_at) "
-                 "VALUES ('policy_alert', ?, ?, 'sent', ?, ?)",
-                 (alert["txn_id"], message_id, alert["policy"], db.now_iso()))
+    conn.execute(
+        "INSERT INTO events (kind, txn_id, message_id, status, detail, created_at) "
+        "VALUES ('policy_alert', ?, ?, 'sent', ?, ?)",
+        (alert["txn_id"], message_id, alert["policy"], db.now_iso()),
+    )
     conn.commit()
     return message_id
 
@@ -94,6 +97,5 @@ def poll_alerts(conn, cfg: dict[str, Any], as_of: date, dry_run: bool = False) -
     if not dry_run:
         db.set_state(conn, state_keys.ALERTS_CHECKED_THROUGH, str(high))
         conn.commit()
-    log.info("poll_alerts: %d row(s) past watermark, %d alert(s)%s",
-             len(rows), sent, " (dry-run)" if dry_run else "")
+    log.info("poll_alerts: %d row(s) past watermark, %d alert(s)%s", len(rows), sent, " (dry-run)" if dry_run else "")
     return sent

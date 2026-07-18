@@ -47,8 +47,10 @@ def load_policies(path: str | Path | None = None) -> list[dict[str, Any]]:
             raise ValueError(f"{p} policy #{i}: needs 'name' and 'cap_monthly_cents'")
         matchers = keys & set(_MATCHERS)
         if len(matchers) != 1:
-            raise ValueError(f"{p} policy #{i} ({entry.get('name')}): needs exactly one matcher "
-                             f"of {_MATCHERS}, got {sorted(matchers) or 'none'}")
+            raise ValueError(
+                f"{p} policy #{i} ({entry.get('name')}): needs exactly one matcher "
+                f"of {_MATCHERS}, got {sorted(matchers) or 'none'}"
+            )
         stray = keys - _ALLOWED_KEYS
         if stray:
             raise ValueError(f"{p} policy #{i} ({entry['name']}): unknown key(s) {sorted(stray)}")
@@ -83,13 +85,16 @@ def alert_text(policy: dict[str, Any], txn, mtd_cents: int, count: int) -> str:
     cap = int(policy["cap_monthly_cents"])
     icon = "🔴" if mtd_cents > cap else "⚠️"
     merchant = display_merchant(txn["merchant_raw"]) or policy["name"]
-    return (f"{icon} {merchant} {db.fmt_eur(-txn['amount_cents'])} — {_ordinal(count)} this month. "
-            f"{db.fmt_eur(mtd_cents)} of your {db.fmt_eur(cap)} {policy['name']} cap. "
-            f"{db.fmt_eur(mtd_cents * 12)}/yr at this pace.")
+    return (
+        f"{icon} {merchant} {db.fmt_eur(-txn['amount_cents'])} — {_ordinal(count)} this month. "
+        f"{db.fmt_eur(mtd_cents)} of your {db.fmt_eur(cap)} {policy['name']} cap. "
+        f"{db.fmt_eur(mtd_cents * 12)}/yr at this pace."
+    )
 
 
-def evaluate(conn, cfg: dict[str, Any], as_of: date, new_txn_ids,
-             path: str | Path | None = None) -> list[dict[str, Any]]:
+def evaluate(
+    conn, cfg: dict[str, Any], as_of: date, new_txn_ids, path: str | Path | None = None
+) -> list[dict[str, Any]]:
     """
     Return {txn_id, policy, text} for each newly-booked spend transaction that
     trips a policy over its monthly cap.
@@ -121,12 +126,13 @@ def evaluate(conn, cfg: dict[str, Any], as_of: date, new_txn_ids,
         for p in policies:
             if not _matches(p, txn):
                 continue
-            prior = [t for t in month_txns
-                     if _matches(p, t)
-                     and (t["booking_date"], t["rid"]) <= (txn["booking_date"], txn["rid"])]
+            prior = [
+                t
+                for t in month_txns
+                if _matches(p, t) and (t["booking_date"], t["rid"]) <= (txn["booking_date"], txn["rid"])
+            ]
             mtd = sum(-t["amount_cents"] for t in prior)
             if mtd > int(p["cap_monthly_cents"]):
-                alerts.append({"txn_id": txn["id"], "policy": p["name"],
-                               "text": alert_text(p, txn, mtd, len(prior))})
+                alerts.append({"txn_id": txn["id"], "policy": p["name"], "text": alert_text(p, txn, mtd, len(prior))})
             break  # first matching policy wins
     return alerts

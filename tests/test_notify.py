@@ -35,8 +35,7 @@ def make_cfg(tmp_path):
         "controller": {"graduation_surplus_cents": 100_000},
         "thresholds": {"green_cents": 2_500, "red_cents": 1_000},
         "telegram": {"poll_timeout_seconds": 50},
-        "categorize": {"merchant_map_path": str(tmp_path / "merchant_map.json"),
-                       "rules_path": None},
+        "categorize": {"merchant_map_path": str(tmp_path / "merchant_map.json"), "rules_path": None},
         "enable_banking": {"api_daily_call_limit": 4},
     }
 
@@ -56,11 +55,19 @@ def bot(tmp_path, monkeypatch):
 
 def _mk_spend(conn, category, name, txns):
     cur = conn.execute(
-        "INSERT INTO merchants (name_normalized, category, categorized_by) VALUES (?, ?, 'dict')",
-        (name, category))
-    rows = [{"account_id": "acc-uid-1", "booking_date": day, "amount_cents": cents,
-             "merchant_raw": name, "merchant_id": cur.lastrowid, "source": "api"}
-            for day, cents in txns]
+        "INSERT INTO merchants (name_normalized, category, categorized_by) VALUES (?, ?, 'dict')", (name, category)
+    )
+    rows = [
+        {
+            "account_id": "acc-uid-1",
+            "booking_date": day,
+            "amount_cents": cents,
+            "merchant_raw": name,
+            "merchant_id": cur.lastrowid,
+            "source": "api",
+        }
+        for day, cents in txns
+    ]
     db.insert_transactions(conn, rows)
     conn.commit()
 
@@ -147,15 +154,18 @@ def test_graduation_surplus_reads_last_completed_month(bot):
 def test_recat_moves_category_and_teaches_merchant(bot):
     conn, cfg, _ = bot
     ref = conn.execute(
-        "SELECT id FROM transactions WHERE merchant_raw = 'COFFEE ANGEL' "
-        "AND booking_date = '2026-07-03'").fetchone()["id"][:8]
+        "SELECT id FROM transactions WHERE merchant_raw = 'COFFEE ANGEL' AND booking_date = '2026-07-03'"
+    ).fetchone()["id"][:8]
     reply = commands.handle_command(conn, cfg, f"/recat {ref} Dates", AS_OF)
     assert reply.startswith("✅") and "always Dates" in reply
-    cats = {r[0] for r in conn.execute(
-        "SELECT category FROM v_transactions_categorized WHERE merchant_raw = 'COFFEE ANGEL'")}
+    cats = {
+        r[0]
+        for r in conn.execute("SELECT category FROM v_transactions_categorized WHERE merchant_raw = 'COFFEE ANGEL'")
+    }
     assert cats == {"Dates"}  # merchant taught → every COFFEE ANGEL is Dates
-    row = conn.execute("SELECT category, categorized_by FROM merchants "
-                       "WHERE name_normalized = 'COFFEE ANGEL'").fetchone()
+    row = conn.execute(
+        "SELECT category, categorized_by FROM merchants WHERE name_normalized = 'COFFEE ANGEL'"
+    ).fetchone()
     assert tuple(row) == ("Dates", "manual")
     saved = json.loads(open(cfg["categorize"]["merchant_map_path"]).read())
     assert saved["COFFEE ANGEL"] == {"category": "Dates", "by": "manual", "confidence": 1.0}
@@ -163,18 +173,24 @@ def test_recat_moves_category_and_teaches_merchant(bot):
 
 def test_date_flips_one_txn_without_touching_merchant(bot):
     conn, cfg, _ = bot
-    txns = conn.execute("SELECT id FROM transactions WHERE merchant_raw = 'LAUNDRETTE' "
-                        "AND booking_date IN ('2026-07-04','2026-07-11') "
-                        "ORDER BY booking_date").fetchall()
+    txns = conn.execute(
+        "SELECT id FROM transactions WHERE merchant_raw = 'LAUNDRETTE' "
+        "AND booking_date IN ('2026-07-04','2026-07-11') "
+        "ORDER BY booking_date"
+    ).fetchall()
     reply = commands.do_date(conn, txns[1]["id"][:8])
     assert reply.startswith("✅") and "just this one" in reply
-    cats = dict(conn.execute(
-        "SELECT id, category FROM v_transactions_categorized WHERE id IN (?, ?)",
-        (txns[0]["id"], txns[1]["id"])).fetchall())
+    cats = dict(
+        conn.execute(
+            "SELECT id, category FROM v_transactions_categorized WHERE id IN (?, ?)", (txns[0]["id"], txns[1]["id"])
+        ).fetchall()
+    )
     assert cats[txns[1]["id"]] == "Dates"
     assert cats[txns[0]["id"]] == "Other"  # sibling untouched
-    assert conn.execute("SELECT category FROM merchants WHERE name_normalized = 'LAUNDRETTE'"
-                        ).fetchone()["category"] == "Other"
+    assert (
+        conn.execute("SELECT category FROM merchants WHERE name_normalized = 'LAUNDRETTE'").fetchone()["category"]
+        == "Other"
+    )
 
 
 def test_owner_id_authorizes_independently_of_chat_id(bot, monkeypatch):
@@ -271,6 +287,7 @@ def test_sync_replies_when_unconfigured_and_is_allowance_exempt(bot, monkeypatch
     monkeypatch.setenv("ENABLE_BANKING_PRIVATE_KEY_PATH", str(key_file))
     db.set_state(conn, "eb_account_uids", '["acc-uid-1"]')
     from datetime import datetime
+
     today = datetime.now(db.TZ).date().isoformat()
     db.set_state(conn, f"api_calls:{today}", "4")  # allowance spent — but /sync is attended
     conn.commit()

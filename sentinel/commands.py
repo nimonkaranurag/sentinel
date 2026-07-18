@@ -52,19 +52,17 @@ def do_recat(conn, cfg: dict[str, Any], ref: str, category_name: str) -> str:
     txn, err = _resolve_txn(conn, ref)
     if err:
         return err
-    conn.execute("UPDATE transactions SET category_override = ? WHERE id = ?",
-                 (category, txn["id"]))
+    conn.execute("UPDATE transactions SET category_override = ? WHERE id = ?", (category, txn["id"]))
     merchant_note = ""
     if txn["merchant_id"] is not None:
-        merchant = conn.execute("SELECT name_normalized FROM merchants WHERE id = ?",
-                                (txn["merchant_id"],)).fetchone()
-        conn.execute("UPDATE merchants SET category = ?, categorized_by = 'manual', "
-                     "confidence = 1.0 WHERE id = ?", (category, txn["merchant_id"]))
-        map_path = Path((cfg.get("categorize") or {}).get("merchant_map_path")
-                        or categorize.DEFAULT_MERCHANT_MAP_PATH)
+        merchant = conn.execute("SELECT name_normalized FROM merchants WHERE id = ?", (txn["merchant_id"],)).fetchone()
+        conn.execute(
+            "UPDATE merchants SET category = ?, categorized_by = 'manual', confidence = 1.0 WHERE id = ?",
+            (category, txn["merchant_id"]),
+        )
+        map_path = Path((cfg.get("categorize") or {}).get("merchant_map_path") or categorize.DEFAULT_MERCHANT_MAP_PATH)
         mapping = categorize.load_merchant_map(map_path)
-        mapping[merchant["name_normalized"]] = {"category": category, "by": "manual",
-                                                "confidence": 1.0}
+        mapping[merchant["name_normalized"]] = {"category": category, "by": "manual", "confidence": 1.0}
         categorize.save_merchant_map(map_path, mapping)
         merchant_note = f"; merchant '{merchant['name_normalized']}' is now always {category}"
     conn.commit()
@@ -75,11 +73,11 @@ def do_date(conn, ref: str) -> str:
     txn, err = _resolve_txn(conn, ref)
     if err:
         return err
-    conn.execute("UPDATE transactions SET category_override = 'Dates' WHERE id = ?",
-                 (txn["id"],))
+    conn.execute("UPDATE transactions SET category_override = 'Dates' WHERE id = ?", (txn["id"],))
     conn.commit()
-    return (f"✅ {txn['id'][:8]} → Dates (just this one — "
-            f"'{txn['merchant_raw'] or 'merchant'}' keeps its usual category)")
+    return (
+        f"✅ {txn['id'][:8]} → Dates (just this one — '{txn['merchant_raw'] or 'merchant'}' keeps its usual category)"
+    )
 
 
 def do_paid_today(conn, cfg: dict[str, Any], arg: str, as_of: date) -> str:
@@ -96,8 +94,10 @@ def do_paid_today(conn, cfg: dict[str, Any], arg: str, as_of: date) -> str:
         try:
             when = date.fromisoformat(arg)
         except ValueError:
-            return (f"Couldn't read {arg!r} as a date. Use /paid-today for today, or "
-                    f"/paid-today YYYY-MM-DD (e.g. /paid-today {as_of.isoformat()}).")
+            return (
+                f"Couldn't read {arg!r} as a date. Use /paid-today for today, or "
+                f"/paid-today YYYY-MM-DD (e.g. /paid-today {as_of.isoformat()})."
+            )
     else:
         when = as_of
     year, month = controller.cycle_month_for(cfg, when)
@@ -110,9 +110,11 @@ def do_paid_today(conn, cfg: dict[str, Any], arg: str, as_of: date) -> str:
         off = (scheduled - when).days
         early_late = f"{render.plural(abs(off), 'day')} {'early' if off > 0 else 'late'}"
         note = f" ({render.fmt_day(scheduled)} payday, {early_late})"
-    return (f"✅ Logged payday: {render.fmt_day(when)}{note}.\n"
-            f"This pay cycle now runs {render.fmt_day(when)} → {render.fmt_day(cycle_end)} "
-            f"and resets your discretionary pool.")
+    return (
+        f"✅ Logged payday: {render.fmt_day(when)}{note}.\n"
+        f"This pay cycle now runs {render.fmt_day(when)} → {render.fmt_day(cycle_end)} "
+        f"and resets your discretionary pool."
+    )
 
 
 def do_sync(conn, cfg: dict[str, Any]) -> str:
@@ -127,16 +129,22 @@ def do_sync(conn, cfg: dict[str, Any]) -> str:
         # exempt from the ~4/day UNATTENDED allowance the crons consume (PSD2 RTS
         # Art. 36(5)). The PSU IP is this host's real LAN IP, not a fiction.
         psu_ip = eb_cfg.get("psu_ip_address") or ingest.local_ip()
-        psu_headers = {"Psu-Ip-Address": str(psu_ip),
-                       "Psu-User-Agent": str(eb_cfg.get("psu_user_agent") or "Sentinel/1.0")}
+        psu_headers = {
+            "Psu-Ip-Address": str(psu_ip),
+            "Psu-User-Agent": str(eb_cfg.get("psu_user_agent") or "Sentinel/1.0"),
+        }
         client = ingest.build_client(cfg, app_id, key_path)
-        default_from = (datetime.now(db.TZ).date()
-                        - timedelta(days=int(eb_cfg.get("first_pull_days", 90)))).isoformat()
+        default_from = (datetime.now(db.TZ).date() - timedelta(days=int(eb_cfg.get("first_pull_days", 90)))).isoformat()
         alerts.ensure_baseline(conn)  # before ingest, so this pull's rows still alert
         inserted, submitted = ingest.run_ingest(
-            conn, client, json.loads(uids_raw), default_from=default_from,
-            psu_headers=psu_headers, cursor_overlap_days=int(eb_cfg.get("cursor_overlap_days", 5)),
-            currency=cfg.get("currency", "EUR"))
+            conn,
+            client,
+            json.loads(uids_raw),
+            default_from=default_from,
+            psu_headers=psu_headers,
+            cursor_overlap_days=int(eb_cfg.get("cursor_overlap_days", 5)),
+            currency=cfg.get("currency", "EUR"),
+        )
         # Attended ingest must also categorize + alert — else a charge that
         # arrives via /sync, precisely when you're watching, can never alert.
         today = datetime.now(db.TZ).date()
@@ -163,8 +171,7 @@ def handle_command(conn, cfg: dict[str, Any], text: str, as_of: date) -> str:
     if cmd == "/sync":
         return do_sync(conn, cfg)
     if cmd == "/recat":
-        return do_recat(conn, cfg, args[0], " ".join(args[1:])) if len(args) >= 2 \
-            else "Usage: /recat <ref> <category>"
+        return do_recat(conn, cfg, args[0], " ".join(args[1:])) if len(args) >= 2 else "Usage: /recat <ref> <category>"
     if cmd == "/date":
         return do_date(conn, args[0]) if args else "Usage: /date <ref>"
     # Telegram won't register a hyphen in a BotFather command menu, so accept the
@@ -202,14 +209,14 @@ def handle_callback(conn, cfg: dict[str, Any], callback: dict[str, Any]) -> None
         reply = do_recat(conn, cfg, ref, category)
         telegram.edit_message(message_id, f"Got it — {category}. {reply}")
         conn.execute("UPDATE events SET status = 'reclassified' WHERE message_id = ?", (message_id,))
-    conn.execute("INSERT INTO processed_callbacks (callback_id, processed_at) VALUES (?, ?)",
-                 (cb_id, db.now_iso()))
+    conn.execute("INSERT INTO processed_callbacks (callback_id, processed_at) VALUES (?, ?)", (cb_id, db.now_iso()))
     conn.commit()
     telegram.answer_callback(cb_id)
 
 
-def _handle_update(conn, cfg: dict[str, Any], update: dict[str, Any], owner_id: str,
-                   as_of: date, dry_run: bool) -> bool:
+def _handle_update(
+    conn, cfg: dict[str, Any], update: dict[str, Any], owner_id: str, as_of: date, dry_run: bool
+) -> bool:
     """
     Dispatch one update. Returns True if it was an owner action that was handled.
 
@@ -241,8 +248,9 @@ def _handle_update(conn, cfg: dict[str, Any], update: dict[str, Any], owner_id: 
     return True
 
 
-def process_updates(conn, cfg: dict[str, Any], as_of: date | None = None,
-                    listen: bool = False, dry_run: bool = False) -> int:
+def process_updates(
+    conn, cfg: dict[str, Any], as_of: date | None = None, listen: bool = False, dry_run: bool = False
+) -> int:
     """
     Answer pending commands: one pass by default, long-polling when listen is
     set.

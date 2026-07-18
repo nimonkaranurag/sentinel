@@ -33,8 +33,7 @@ log = logging.getLogger(__name__)
 # ── Daily push ──────────────────────────────────────────────────────────────
 
 
-def push_daily(conn, cfg: dict, as_of: date | None = None,
-               dry_run: bool = False, force: bool = False) -> bool:
+def push_daily(conn, cfg: dict, as_of: date | None = None, dry_run: bool = False, force: bool = False) -> bool:
     """
     Send the daily push (safe-to-spend and traffic light). Idempotent per day.
 
@@ -84,9 +83,14 @@ def run_poll(conn, cfg: dict, as_of: date | None = None, dry_run: bool = False) 
                 try:
                     client = ingest.build_client(cfg, app_id, key_path)
                     default_from = (as_of - timedelta(days=int(eb.get("first_pull_days", 90)))).isoformat()
-                    ingest.run_ingest(conn, client, json.loads(uids_raw), default_from=default_from,
-                                      cursor_overlap_days=int(eb.get("cursor_overlap_days", 5)),
-                                      currency=cfg.get("currency", "EUR"))
+                    ingest.run_ingest(
+                        conn,
+                        client,
+                        json.loads(uids_raw),
+                        default_from=default_from,
+                        cursor_overlap_days=int(eb.get("cursor_overlap_days", 5)),
+                        currency=cfg.get("currency", "EUR"),
+                    )
                 except Exception as exc:
                     log.warning("poll ingest failed: %s", exc)
                     ingest.warn_on_auth_error(conn, exc)  # a 401/403 tells the owner to re-auth

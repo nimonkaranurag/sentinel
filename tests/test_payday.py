@@ -15,11 +15,10 @@ def make_cfg(tmp_path):
     return {
         "db_path": str(tmp_path / "ledger.db"),
         "payday": {"day_of_month": 23},
-        "budgets": {"pool_monthly_cents": 120_000},   # €1,200 / cycle
+        "budgets": {"pool_monthly_cents": 120_000},  # €1,200 / cycle
         "controller": {"unlabeled_inflow_exclude_cents": 10_000},
         "thresholds": {"green_cents": 2_500, "red_cents": 1_000},
-        "categorize": {"merchant_map_path": str(tmp_path / "merchant_map.json"),
-                       "rules_path": None},
+        "categorize": {"merchant_map_path": str(tmp_path / "merchant_map.json"), "rules_path": None},
     }
 
 
@@ -31,12 +30,22 @@ def _conn(tmp_path):
 
 def _spend(conn, category, name, txns):
     cur = conn.execute(
-        "INSERT INTO merchants (name_normalized, category, categorized_by) VALUES (?, ?, 'dict')",
-        (name, category))
-    db.insert_transactions(conn, [
-        {"account_id": "acc-uid-1", "booking_date": day, "amount_cents": cents,
-         "merchant_raw": name, "merchant_id": cur.lastrowid, "source": "api"}
-        for day, cents in txns])
+        "INSERT INTO merchants (name_normalized, category, categorized_by) VALUES (?, ?, 'dict')", (name, category)
+    )
+    db.insert_transactions(
+        conn,
+        [
+            {
+                "account_id": "acc-uid-1",
+                "booking_date": day,
+                "amount_cents": cents,
+                "merchant_raw": name,
+                "merchant_id": cur.lastrowid,
+                "source": "api",
+            }
+            for day, cents in txns
+        ],
+    )
     conn.commit()
 
 
@@ -49,13 +58,13 @@ def test_cycle_counts_down_to_the_scheduled_payday(tmp_path):
     before = controller.safe_to_spend(conn, cfg, date(2026, 7, 18))
     assert before["cycle_start"] == "2026-06-23"
     assert before["next_payday"] == "2026-07-23"
-    assert before["days_left"] == 5              # 18 → 23 Jul
+    assert before["days_left"] == 5  # 18 → 23 Jul
     assert before["cycle_start_source"] == "scheduled"
     # On payday itself a fresh cycle begins.
     on_payday = controller.safe_to_spend(conn, cfg, date(2026, 7, 23))
     assert on_payday["cycle_start"] == "2026-07-23"
     assert on_payday["next_payday"] == "2026-08-23"
-    assert on_payday["days_left"] == 31          # 23 Jul → 23 Aug
+    assert on_payday["days_left"] == 31  # 23 Jul → 23 Aug
     conn.close()
 
 
@@ -82,7 +91,7 @@ def test_paid_today_rolls_the_cycle_when_paid_early(tmp_path):
     conn = _conn(tmp_path)
     cfg = make_cfg(tmp_path)
     _spend(conn, "Groceries", "TESCO", [("2026-07-10", -60_000)])  # last cycle
-    _spend(conn, "Groceries", "SPAR", [("2026-07-22", -10_000)])   # new cycle
+    _spend(conn, "Groceries", "SPAR", [("2026-07-22", -10_000)])  # new cycle
     # Before logging, the 22nd is still the tail of the June-23 cycle.
     before = controller.safe_to_spend(conn, cfg, date(2026, 7, 22))
     assert before["cycle_start"] == "2026-06-23" and before["days_left"] == 1
@@ -161,8 +170,8 @@ def test_today_and_status_read_cleanly(tmp_path):
 
 def test_sync_reply_is_plain_english(tmp_path):
     assert render.sync_reply(0, 249, 0) == (
-        "✅ Bank sync done — you're already up to date.\n"
-        "• No new transactions (checked 249)\n• No new alerts.")
+        "✅ Bank sync done — you're already up to date.\n• No new transactions (checked 249)\n• No new alerts."
+    )
     busy = render.sync_reply(12, 249, 1)
     assert "12 new transactions (checked 249)" in busy
     assert "1 new alert" in busy

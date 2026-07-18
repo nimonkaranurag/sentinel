@@ -5,9 +5,9 @@ import pytest
 from sentinel import db, reports
 
 AS_OF = date(2026, 7, 14)  # window: 2026-04-15 → 2026-07-14
-TARGET_RESIDUAL = 12_000   # €120 engineered residual for full months
-FULL_MONTH_INFLOWS = 430_000          # salary 3300 + family transfer 1000
-FULL_MONTH_FIXED = 169_100            # rent + utilities + tools + bjj
+TARGET_RESIDUAL = 12_000  # €120 engineered residual for full months
+FULL_MONTH_INFLOWS = 430_000  # salary 3300 + family transfer 1000
+FULL_MONTH_FIXED = 169_100  # rent + utilities + tools + bjj
 FULL_MONTH_VARIABLE = FULL_MONTH_INFLOWS - FULL_MONTH_FIXED - TARGET_RESIDUAL  # 248,900
 COFFEE_TXNS = 19  # 8 (May) + 8 (Jun) + 3 (Jul) — the only <€5 spend
 
@@ -44,19 +44,30 @@ def build_ledger(conn):
     for name, category in MERCHANTS.items():
         cur = conn.execute(
             "INSERT INTO merchants (name_normalized, category, categorized_by, first_seen) "
-            "VALUES (?, ?, 'dict', '2026-04-01')", (name, category))
+            "VALUES (?, ?, 'dict', '2026-04-01')",
+            (name, category),
+        )
         ids[name] = cur.lastrowid
 
     rows = []
 
     def txn(day: date, merchant: str, cents: int):
-        rows.append({"account_id": "acc-uid-1", "booking_date": day.isoformat(),
-                     "amount_cents": cents, "merchant_raw": merchant,
-                     "merchant_id": ids[merchant], "source": "api"})
+        rows.append(
+            {
+                "account_id": "acc-uid-1",
+                "booking_date": day.isoformat(),
+                "amount_cents": cents,
+                "merchant_raw": merchant,
+                "merchant_id": ids[merchant],
+                "source": "api",
+            }
+        )
 
     for month, random_day, random_cents in ((5, 3, -5_000), (6, 25, -12_000)):
+
         def d(day):
             return date(2026, month, day)
+
         txn(d(1), "SALARY ACME", 330_000)
         txn(d(15), "FAMILY TRANSFER", 100_000)
         txn(d(2), "LANDLORD SO", -136_800)
@@ -77,12 +88,13 @@ def build_ledger(conn):
         txn(d(14), "MYSTERY POS", -7_500)
         txn(d(random_day), "RANDOM BAZAAR", random_cents)
         laundrette_month = sum(1_200 for x in _laundrette_dates() if x.month == month)
-        base_variable = (1_799 + 6 * 4_500 + 8 * 350 + 3 * 1_850 + 2 * 2_000
-                         + 6_000 + 9_900 + abs(random_cents) + laundrette_month)
+        base_variable = (
+            1_799 + 6 * 4_500 + 8 * 350 + 3 * 1_850 + 2 * 2_000 + 6_000 + 9_900 + abs(random_cents) + laundrette_month
+        )
         txn(d(20), "BALANCER SHOP", -(FULL_MONTH_VARIABLE - base_variable))
 
     # Recurring history + partial months at the window edges.
-    txn(date(2026, 4, 5), "NETFLIX.COM", -1_799)   # before window; detector history
+    txn(date(2026, 4, 5), "NETFLIX.COM", -1_799)  # before window; detector history
     txn(date(2026, 4, 20), "RANDOM BAZAAR", -1_000)
     for day in _laundrette_dates():
         txn(day, "LAUNDRETTE", -1_200)
@@ -104,9 +116,13 @@ def make_cfg(tmp_path):
             "output_dir": str(tmp_path / "reports"),
             "window_days": 90,
             "monthly_budget_cents": None,
-            "recurring": {"min_occurrences": 3, "amount_cv_max": 0.10,
-                          "monthly_days": [28, 32], "weekly_days": [6, 8],
-                          "mad_max_days": 3},
+            "recurring": {
+                "min_occurrences": 3,
+                "amount_cv_max": 0.10,
+                "monthly_days": [28, 32],
+                "weekly_days": [6, 8],
+                "mad_max_days": 3,
+            },
         },
     }
 
@@ -142,8 +158,7 @@ def test_reconciliation_identity_is_exact(diagnosed):
     _, data, _ = diagnosed
     assert data["months"], "window must contain months"
     for m in data["months"]:
-        assert (m["residual_cents"]
-                == m["uncategorized_cents"] + m["transfers_out_cents"] + m["net_cents"]), m
+        assert m["residual_cents"] == m["uncategorized_cents"] + m["transfers_out_cents"] + m["net_cents"], m
 
 
 # ── Required report sections ──────────────────────────────────────────────
@@ -201,8 +216,7 @@ def test_recurring_detector(diagnosed):
     assert laundrette["period"] == "weekly"
     assert laundrette["annualized_cents"] == 1_200 * 52
     assert "RANDOM BAZAAR" not in subs  # wild amounts/intervals must not flag
-    assert data["recurring"] == sorted(data["recurring"],
-                                       key=lambda s: -s["annualized_cents"])
+    assert data["recurring"] == sorted(data["recurring"], key=lambda s: -s["annualized_cents"])
 
 
 def test_burn_budget_is_full_month_average(diagnosed):
@@ -216,9 +230,15 @@ def test_burn_budget_is_full_month_average(diagnosed):
 
 def test_files_written_with_expected_content(diagnosed):
     _, data, outdir = diagnosed
-    expected = {"EXPENSE_REPORT.md", "subscriptions.md", "category_pareto.png",
-                "merchant_pareto.png", "size_bands.png", "weekday_profile.png",
-                "burn_rate.png"}
+    expected = {
+        "EXPENSE_REPORT.md",
+        "subscriptions.md",
+        "category_pareto.png",
+        "merchant_pareto.png",
+        "size_bands.png",
+        "weekday_profile.png",
+        "burn_rate.png",
+    }
     assert set(data["files"]) == expected
     for name in expected:
         assert (outdir / name).stat().st_size > 0

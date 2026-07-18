@@ -70,16 +70,13 @@ def _post_telegram(token: str, method: str, payload: dict[str, Any]) -> dict[str
     non-JSON reply, or non-ok response.
     """
     try:
-        resp = requests.post(f"{TELEGRAM_API}/bot{token}/{method}", json=payload,
-                             timeout=HTTP_TIMEOUT)
+        resp = requests.post(f"{TELEGRAM_API}/bot{token}/{method}", json=payload, timeout=HTTP_TIMEOUT)
     except requests.RequestException as exc:
         raise NotifyError(f"telegram {method} transport error: {redact(str(exc), token)}") from None
     try:
         body = resp.json()
     except ValueError:  # a non-JSON body (HTML error page) is not a RequestException
-        raise NotifyError(
-            redact(f"telegram {method}: non-JSON reply (HTTP {resp.status_code})", token)
-        ) from None
+        raise NotifyError(redact(f"telegram {method}: non-JSON reply (HTTP {resp.status_code})", token)) from None
     if resp.status_code != 200 or not body.get("ok"):
         raise NotifyError(redact(f"telegram {method} failed: {resp.status_code} {str(body)[:300]}", token))
     return body
@@ -101,8 +98,7 @@ def post(method: str, payload: dict[str, Any]) -> dict[str, Any]:
 def send_message(text: str) -> None:
     token, chat_id = credentials()
     for start in range(0, len(text), MAX_MESSAGE_CHARS):
-        _post_telegram(token, "sendMessage",
-                       {"chat_id": chat_id, "text": text[start:start + MAX_MESSAGE_CHARS]})
+        _post_telegram(token, "sendMessage", {"chat_id": chat_id, "text": text[start : start + MAX_MESSAGE_CHARS]})
 
 
 def edit_message(message_id: Any, text: str, reply_markup: dict[str, Any] | None = None) -> None:
@@ -115,8 +111,7 @@ def edit_message(message_id: Any, text: str, reply_markup: dict[str, Any] | None
 
 def answer_callback(callback_id: str, text: str = "") -> None:
     token, _ = credentials()
-    _post_telegram(token, "answerCallbackQuery",
-                   {"callback_query_id": callback_id, "text": text})
+    _post_telegram(token, "answerCallbackQuery", {"callback_query_id": callback_id, "text": text})
 
 
 def get_updates(offset: int, timeout: int) -> list[dict[str, Any]]:

@@ -94,8 +94,12 @@ def cycle_for(conn, cfg: dict[str, Any], as_of: date) -> dict[str, Any]:
     )
     start = max((pd for pd in paydays if pd[0] <= as_of), key=lambda pd: pd[0])
     nxt = min((pd for pd in paydays if pd[0] > as_of), key=lambda pd: pd[0])
-    return {"cycle_start": start[0], "cycle_start_source": start[1],
-            "next_payday": nxt[0], "days_left": (nxt[0] - as_of).days}
+    return {
+        "cycle_start": start[0],
+        "cycle_start_source": start[1],
+        "next_payday": nxt[0],
+        "days_left": (nxt[0] - as_of).days,
+    }
 
 
 def cycle_month_for(cfg: dict[str, Any], when: date) -> tuple[int, int]:
@@ -221,14 +225,14 @@ def month_surplus(conn, month_key: str, inflow_exclude_cents: int = 0) -> dict[s
     row = conn.execute(
         "SELECT "
         "  SUM(CASE WHEN amount_cents > 0 AND category = 'Income' THEN amount_cents ELSE 0 END) AS income, "
-        "  SUM(CASE WHEN category NOT IN ('Transfers', 'Income') " + exclude +
-        "      THEN -amount_cents ELSE 0 END) AS spend "
+        "  SUM(CASE WHEN category NOT IN ('Transfers', 'Income') "
+        + exclude
+        + "      THEN -amount_cents ELSE 0 END) AS spend "
         "FROM v_transactions_categorized WHERE strftime('%Y-%m', booking_date) = ?",
         params,
     ).fetchone()
     income, spend = int(row["income"] or 0), int(row["spend"] or 0)
-    return {"month": month_key, "income_cents": income, "spend_cents": spend,
-            "surplus_cents": income - spend}
+    return {"month": month_key, "income_cents": income, "spend_cents": spend, "surplus_cents": income - spend}
 
 
 def graduation_surplus(conn, cfg: dict[str, Any], as_of: date) -> dict[str, Any]:
@@ -259,20 +263,28 @@ def main(argv: list[str] | None = None) -> int:
         db.init_db(conn)
         as_of = date.fromisoformat(args.as_of) if args.as_of else datetime.now(db.TZ).date()
         s = safe_to_spend(conn, cfg, as_of)
-        log.info("safe to spend today: %s · %s of %s pool left · %d day(s) to payday (%s)",
-                 db.fmt_eur(s["safe_today_cents"]), db.fmt_eur(s["remaining_cents"]),
-                 db.fmt_eur(s["pool_cents"]), s["days_left"], s["next_payday"])
+        log.info(
+            "safe to spend today: %s · %s of %s pool left · %d day(s) to payday (%s)",
+            db.fmt_eur(s["safe_today_cents"]),
+            db.fmt_eur(s["remaining_cents"]),
+            db.fmt_eur(s["pool_cents"]),
+            s["days_left"],
+            s["next_payday"],
+        )
         # The hard-rails runbook (docs/RAILS.md) funds a discretionary card with a
         # weekly standing order; this is the amount — the monthly pool spread over
         # a year of weeks. Round DOWN when you set the standing order.
-        log.info("suggested weekly rail: %s (monthly pool × 12 ÷ 52)",
-                 db.fmt_eur(pool_cents(cfg) * 12 // 52))
+        log.info("suggested weekly rail: %s (monthly pool × 12 ÷ 52)", db.fmt_eur(pool_cents(cfg) * 12 // 52))
         for b in DISCRETIONARY_BUCKETS:
             log.info("  %-13s %s", b, db.fmt_eur(s["by_bucket_cents"].get(b, 0)))
         grad = graduation_surplus(conn, cfg, as_of)
-        log.info("last month (%s) surplus: %s (target %s%s)", grad["month"],
-                 db.fmt_eur(grad["surplus_cents"]), db.fmt_eur(grad["target_cents"]),
-                 " — 🎓 met" if grad["met"] else "")
+        log.info(
+            "last month (%s) surplus: %s (target %s%s)",
+            grad["month"],
+            db.fmt_eur(grad["surplus_cents"]),
+            db.fmt_eur(grad["target_cents"]),
+            " — 🎓 met" if grad["met"] else "",
+        )
         return 0
     finally:
         conn.close()

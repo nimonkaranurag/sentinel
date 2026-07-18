@@ -35,19 +35,34 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(telegram, "_post_telegram", fake)
     pol = tmp_path / "policies.yaml"
     pol.write_text(POLICIES)
-    cfg = {"db_path": str(tmp_path / "ledger.db"),
-           "policies": {"path": str(pol)},
-           "categorize": {"merchant_map_path": str(tmp_path / "merchant_map.json"), "rules_path": None},
-           "enable_banking": {"api_daily_call_limit": 4, "first_pull_days": 90}}
+    cfg = {
+        "db_path": str(tmp_path / "ledger.db"),
+        "policies": {"path": str(pol)},
+        "categorize": {"merchant_map_path": str(tmp_path / "merchant_map.json"), "rules_path": None},
+        "enable_banking": {"api_daily_call_limit": 4, "first_pull_days": 90},
+    }
     return conn, cfg, fake
 
 
 def _deliveroo(conn, day, cents):
-    conn.execute("INSERT OR IGNORE INTO merchants (name_normalized, category, categorized_by) "
-                 "VALUES ('DELIVEROO', 'FoodDelivery', 'dict')")
+    conn.execute(
+        "INSERT OR IGNORE INTO merchants (name_normalized, category, categorized_by) "
+        "VALUES ('DELIVEROO', 'FoodDelivery', 'dict')"
+    )
     mid = conn.execute("SELECT id FROM merchants WHERE name_normalized='DELIVEROO'").fetchone()[0]
-    db.insert_transactions(conn, [{"account_id": "a", "booking_date": day, "amount_cents": cents,
-                                   "merchant_raw": "DELIVEROO", "merchant_id": mid, "source": "api"}])
+    db.insert_transactions(
+        conn,
+        [
+            {
+                "account_id": "a",
+                "booking_date": day,
+                "amount_cents": cents,
+                "merchant_raw": "DELIVEROO",
+                "merchant_id": mid,
+                "source": "api",
+            }
+        ],
+    )
     conn.commit()
 
 
@@ -270,10 +285,14 @@ def test_batch_survives_a_poison_update_and_advances_past_it(env, monkeypatch):
         return real(conn_, cfg_, update, owner, as_of, dry_run)
 
     monkeypatch.setattr(commands, "_handle_update", flaky)
-    monkeypatch.setattr(telegram, "get_updates", lambda o, t: [
-        {"update_id": 1, "message": {"chat": {"id": 777}, "from": {"id": 777}, "text": "/today"}},
-        {"update_id": 2, "message": {"chat": {"id": 777}, "from": {"id": 777}, "text": "/today"}},
-    ])
+    monkeypatch.setattr(
+        telegram,
+        "get_updates",
+        lambda o, t: [
+            {"update_id": 1, "message": {"chat": {"id": 777}, "from": {"id": 777}, "text": "/today"}},
+            {"update_id": 2, "message": {"chat": {"id": 777}, "from": {"id": 777}, "text": "/today"}},
+        ],
+    )
     handled = commands.process_updates(conn, cfg, listen=False)  # one-shot
     assert handled == 1, "the good update was handled; the poison one didn't crash the batch"
     assert any(p["text"].startswith("Safe to spend") for p in fake.sent)
