@@ -34,11 +34,25 @@ _TRAILING_TOKEN_PATTERNS = [
 
 # Common Irish city/area suffixes seen on card statements. Trailing tokens only,
 # so "DUBLIN BUS" is untouched while "LIDL DUBLIN" → "LIDL".
-CITY_SUFFIXES = frozenset({
-    "DUBLIN", "CORK", "GALWAY", "LIMERICK", "WATERFORD", "KILKENNY",
-    "BRAY", "SWORDS", "TALLAGHT", "DUNDRUM", "BLANCHARDSTOWN", "MAYNOOTH",
-    "IE", "IRL", "IRELAND",
-})
+CITY_SUFFIXES = frozenset(
+    {
+        "DUBLIN",
+        "CORK",
+        "GALWAY",
+        "LIMERICK",
+        "WATERFORD",
+        "KILKENNY",
+        "BRAY",
+        "SWORDS",
+        "TALLAGHT",
+        "DUNDRUM",
+        "BLANCHARDSTOWN",
+        "MAYNOOTH",
+        "IE",
+        "IRL",
+        "IRELAND",
+    }
+)
 
 _HAS_LETTER = re.compile(r"[A-Z]")
 
@@ -92,10 +106,10 @@ def normalize(merchant_raw: str | None) -> str:
     while len(tokens) > 1:
         tail = tokens[-1]
         if any(p.match(tail) for p in _TRAILING_TOKEN_PATTERNS):
-            tokens.pop()                        # store numbers / dates: always strip
+            tokens.pop()  # store numbers / dates: always strip
         elif tail in CITY_SUFFIXES and len(tokens) > 2:
-            tokens.pop()                        # city: only when ≥2 tokens remain, so
-        else:                                   # "CAFE DUBLIN" ≢ "CAFE CORK"
+            tokens.pop()  # city: only when ≥2 tokens remain, so
+        else:  # "CAFE DUBLIN" ≢ "CAFE CORK"
             break
     result = " ".join(tokens)
 

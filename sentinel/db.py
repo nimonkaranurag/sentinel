@@ -131,9 +131,7 @@ def init_db(conn: sqlite3.Connection) -> int:
         try:
             for number, path in pending:
                 if number != version + 1:
-                    raise RuntimeError(
-                        f"migration gap: at version {version}, next file is {path.name}"
-                    )
+                    raise RuntimeError(f"migration gap: at version {version}, next file is {path.name}")
                 conn.executescript(path.read_text(encoding="utf-8"))
                 conn.execute(f"PRAGMA user_version = {number}")
                 version = number
@@ -158,8 +156,7 @@ def get_state(conn: sqlite3.Connection, key: str, default: str | None = None) ->
 
 def set_state(conn: sqlite3.Connection, key: str, value: str) -> None:
     conn.execute(
-        "INSERT INTO state (key, value) VALUES (?, ?) "
-        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        "INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         (key, str(value)),
     )
 
@@ -282,9 +279,7 @@ def prepare_transactions(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, An
     return prepared
 
 
-def insert_transactions(
-    conn: sqlite3.Connection, rows: Iterable[Mapping[str, Any]]
-) -> tuple[int, int]:
+def insert_transactions(conn: sqlite3.Connection, rows: Iterable[Mapping[str, Any]]) -> tuple[int, int]:
     """
     INSERT OR IGNORE prepared rows. Returns (inserted, submitted).
 
@@ -299,8 +294,9 @@ def insert_transactions(
 # ── Quarantine (rows that cannot enter the ledger) ────────────────────────
 
 
-def quarantine_row(conn: sqlite3.Connection, source: str, reason: str,
-                   raw: Mapping[str, Any], account_id: str | None = None) -> None:
+def quarantine_row(
+    conn: sqlite3.Connection, source: str, reason: str, raw: Mapping[str, Any], account_id: str | None = None
+) -> None:
     """
     Record a row that could not be booked (non-EUR, sign-ambiguous, malformed) so
     it is retained and countable instead of vanishing into a log line.
@@ -350,8 +346,7 @@ def main(argv: list[str] | None = None) -> int:
         pending = [p.name for n, p in _migration_files() if n > max(current, SCHEMA_VERSION)]
         if current == 0:
             pending.insert(0, "schema.sql")
-        log.info("dry-run: %s at version %d; would apply: %s",
-                 db_path, current, ", ".join(pending) or "nothing")
+        log.info("dry-run: %s at version %d; would apply: %s", db_path, current, ", ".join(pending) or "nothing")
         return 0
 
     conn = connect(db_path)

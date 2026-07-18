@@ -64,31 +64,27 @@ def _raise_for_status(resp: requests.Response) -> None:
     explain the underlying problem (bad aspsp name, expired token, and so on).
     """
     if not resp.ok:
-        log.error("%s %s → HTTP %s: %s", resp.request.method, resp.url,
-                  resp.status_code, (resp.text or "")[:800])
+        log.error("%s %s → HTTP %s: %s", resp.request.method, resp.url, resp.status_code, (resp.text or "")[:800])
     resp.raise_for_status()
 
 
 def get_aspsps(base_url: str, app_id: str, key_path: str) -> list[dict[str, Any]]:
-    resp = requests.get(f"{base_url}/aspsps", headers=_api_headers(app_id, key_path),
-                        timeout=HTTP_TIMEOUT)
+    resp = requests.get(f"{base_url}/aspsps", headers=_api_headers(app_id, key_path), timeout=HTTP_TIMEOUT)
     _raise_for_status(resp)
     body = resp.json()
     return body.get("aspsps", []) if isinstance(body, dict) else body
 
 
-def start_authorization(base_url: str, body: dict[str, Any],
-                        app_id: str, key_path: str) -> dict[str, Any]:
-    resp = requests.post(f"{base_url}/auth", json=body,
-                         headers=_api_headers(app_id, key_path), timeout=HTTP_TIMEOUT)
+def start_authorization(base_url: str, body: dict[str, Any], app_id: str, key_path: str) -> dict[str, Any]:
+    resp = requests.post(f"{base_url}/auth", json=body, headers=_api_headers(app_id, key_path), timeout=HTTP_TIMEOUT)
     _raise_for_status(resp)
     return resp.json()
 
 
-def create_session(base_url: str, code: str,
-                   app_id: str, key_path: str) -> dict[str, Any]:
-    resp = requests.post(f"{base_url}/sessions", json={"code": code},
-                         headers=_api_headers(app_id, key_path), timeout=HTTP_TIMEOUT)
+def create_session(base_url: str, code: str, app_id: str, key_path: str) -> dict[str, Any]:
+    resp = requests.post(
+        f"{base_url}/sessions", json={"code": code}, headers=_api_headers(app_id, key_path), timeout=HTTP_TIMEOUT
+    )
     _raise_for_status(resp)
     return resp.json()
 
@@ -108,8 +104,7 @@ def find_named(aspsps: list[dict[str, Any]], name: str) -> dict[str, Any] | None
     return None
 
 
-def compute_valid_until(now_utc: datetime, max_days: int,
-                        bank_max_seconds: int | None = None) -> str:
+def compute_valid_until(now_utc: datetime, max_days: int, bank_max_seconds: int | None = None) -> str:
     """
     Return the RFC3339 (Zulu) consent expiry, clamped to the bank's stated
     maximum.
@@ -126,8 +121,9 @@ def compute_valid_until(now_utc: datetime, max_days: int,
     return exp.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def build_auth_request(valid_until: str, aspsp: dict[str, Any], redirect_url: str,
-                       psu_type: str, state: str) -> dict[str, Any]:
+def build_auth_request(
+    valid_until: str, aspsp: dict[str, Any], redirect_url: str, psu_type: str, state: str
+) -> dict[str, Any]:
     """
     Build the POST /auth body. A minimal `access` of just valid_until grants the
     default account-information scope.
@@ -166,8 +162,9 @@ def extract_code(pasted: str, expected_state: str | None = None) -> str:
             raise ValueError("state missing or mismatched — possible CSRF; aborting")
         return code
     if expected_state:
-        raise ValueError("paste the FULL redirect URL, not just the code — the state "
-                         "parameter is required to verify it (CSRF guard)")
+        raise ValueError(
+            "paste the FULL redirect URL, not just the code — the state parameter is required to verify it (CSRF guard)"
+        )
     return s  # a bare code, only when no state verification is expected
 
 
@@ -219,10 +216,13 @@ def _print_sca_banner(url: str, redirect_url: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Complete the Enable Banking authorization handshake (SPEC §6, Phase 0).")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="authenticate + list banks + print the POST /auth body, "
-                             "but start no session and write no state")
+        description="Complete the Enable Banking authorization handshake (SPEC §6, Phase 0)."
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="authenticate + list banks + print the POST /auth body, but start no session and write no state",
+    )
     parser.add_argument("--db", default=None, help="database path (default: config db_path)")
     parser.add_argument("--config", default=None, help="path to config.yaml")
     args = parser.parse_args(argv)
@@ -235,8 +235,10 @@ def main(argv: list[str] | None = None) -> int:
     app_id = os.environ.get("ENABLE_BANKING_APP_ID")
     key_path = os.environ.get("ENABLE_BANKING_PRIVATE_KEY_PATH")
     if not app_id or not key_path:
-        log.error("Phase 0 incomplete: set ENABLE_BANKING_APP_ID and "
-                  "ENABLE_BANKING_PRIVATE_KEY_PATH in .env (SPEC §6 runbook)")
+        log.error(
+            "Phase 0 incomplete: set ENABLE_BANKING_APP_ID and "
+            "ENABLE_BANKING_PRIVATE_KEY_PATH in .env (SPEC §6 runbook)"
+        )
         return 2
     if not Path(key_path).is_file():
         log.error("private key not found at %s (path only, key stays outside the repo)", key_path)
@@ -244,8 +246,7 @@ def main(argv: list[str] | None = None) -> int:
 
     redirect_url = eb.get("redirect_url")
     if not redirect_url:
-        log.error("set enable_banking.redirect_url in config.yaml (must match the "
-                  "URL registered with the app)")
+        log.error("set enable_banking.redirect_url in config.yaml (must match the URL registered with the app)")
         return 2
     base_url = eb.get("base_url", DEFAULT_BASE_URL).rstrip("/")
     country = eb.get("aspsp_country", "IE")
@@ -263,8 +264,9 @@ def main(argv: list[str] | None = None) -> int:
         if aspsp_name:
             chosen = find_named(candidates, aspsp_name)
             if not chosen:
-                log.error("aspsp_name %r not among %d %s banks; --dry-run lists them",
-                          aspsp_name, len(candidates), country)
+                log.error(
+                    "aspsp_name %r not among %d %s banks; --dry-run lists them", aspsp_name, len(candidates), country
+                )
                 return 2
         elif args.dry_run or len(candidates) == 1:
             chosen = candidates[0]  # dry-run preview uses the first as a placeholder
@@ -281,8 +283,10 @@ def main(argv: list[str] | None = None) -> int:
             for i, a in enumerate(candidates):
                 print(_describe(i, a))
             print("\nWould POST /auth with:\n" + json.dumps(auth_body, indent=2))
-            print("\n(dry-run: no session started, no state written. Set "
-                  "enable_banking.aspsp_name to the exact name above to skip the prompt.)")
+            print(
+                "\n(dry-run: no session started, no state written. Set "
+                "enable_banking.aspsp_name to the exact name above to skip the prompt.)"
+            )
             return 0
 
         auth = start_authorization(base_url, auth_body, app_id, key_path)
@@ -310,21 +314,26 @@ def main(argv: list[str] | None = None) -> int:
         db.set_state(conn, state_keys.EB_ACCOUNT_UIDS, json.dumps(uids))
         db.set_state(conn, state_keys.CONSENT_EXPIRY, consent_expiry)
         db.set_state(conn, state_keys.EB_SESSION_ID, session.get("session_id", ""))
-        db.set_state(conn, state_keys.EB_ASPSP, json.dumps(
-            {"name": chosen["name"], "country": chosen["country"]}))
-        conn.execute("DELETE FROM state WHERE key = ?",
-                     (state_keys.CONSENT_WARNED_ON,))  # re-arm the T−14d nag
+        db.set_state(conn, state_keys.EB_ASPSP, json.dumps({"name": chosen["name"], "country": chosen["country"]}))
+        conn.execute("DELETE FROM state WHERE key = ?", (state_keys.CONSENT_WARNED_ON,))  # re-arm the T−14d nag
         conn.commit()
     finally:
         conn.close()
 
-    days_left = (datetime.fromisoformat(consent_expiry.replace("Z", "+00:00"))
-                 - datetime.now(UTC)).days
-    log.info("authorized %s (%s): %d account(s), consent valid until %s (~%d days)",
-             chosen["name"], chosen["country"], len(uids), consent_expiry[:10], days_left)
-    print(f"\n✅ Phase 0 auth done. {len(uids)} account uid(s) stored in state; "
-          f"consent expires {consent_expiry[:10]}.\n   Next: `make poll` to pull, "
-          f"categorize, and alert (or `make backfill` for the 12-month CSV first).")
+    days_left = (datetime.fromisoformat(consent_expiry.replace("Z", "+00:00")) - datetime.now(UTC)).days
+    log.info(
+        "authorized %s (%s): %d account(s), consent valid until %s (~%d days)",
+        chosen["name"],
+        chosen["country"],
+        len(uids),
+        consent_expiry[:10],
+        days_left,
+    )
+    print(
+        f"\n✅ Phase 0 auth done. {len(uids)} account uid(s) stored in state; "
+        f"consent expires {consent_expiry[:10]}.\n   Next: `make poll` to pull, "
+        f"categorize, and alert (or `make backfill` for the 12-month CSV first)."
+    )
     return 0
 
 

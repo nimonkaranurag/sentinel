@@ -74,8 +74,7 @@ def make_jwt(app_id: str, private_key_path: str, ttl: int = JWT_TTL_SECONDS) -> 
     """
     header = {"typ": "JWT", "alg": "RS256", "kid": app_id}
     now = int(time.time())
-    payload = {"iss": "enablebanking.com", "aud": "api.enablebanking.com",
-               "iat": now, "exp": now + ttl}
+    payload = {"iss": "enablebanking.com", "aud": "api.enablebanking.com", "iat": now, "exp": now + ttl}
     signing_input = (
         _b64url(json.dumps(header, separators=(",", ":")).encode())
         + b"."
@@ -83,7 +82,9 @@ def make_jwt(app_id: str, private_key_path: str, ttl: int = JWT_TTL_SECONDS) -> 
     )
     result = subprocess.run(
         ["openssl", "dgst", "-sha256", "-sign", private_key_path],
-        input=signing_input, capture_output=True, check=True,
+        input=signing_input,
+        capture_output=True,
+        check=True,
     )
     return (signing_input + b"." + _b64url(result.stdout)).decode()
 
@@ -107,8 +108,15 @@ def local_ip() -> str:
 
 
 class EnableBankingClient:
-    def __init__(self, app_id: str, private_key_path: str, base_url: str = DEFAULT_BASE_URL,
-                 max_retries: int = 2, retry_backoff: float = 1.5, max_pages: int = 50):
+    def __init__(
+        self,
+        app_id: str,
+        private_key_path: str,
+        base_url: str = DEFAULT_BASE_URL,
+        max_retries: int = 2,
+        retry_backoff: float = 1.5,
+        max_pages: int = 50,
+    ):
         self.app_id = app_id
         self.private_key_path = private_key_path
         self.base_url = base_url.rstrip("/")
@@ -122,8 +130,7 @@ class EnableBankingClient:
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {make_jwt(self.app_id, self.private_key_path)}"}
 
-    def _get_json(self, url: str, params: dict[str, str],
-                  psu_headers: dict[str, str] | None) -> dict[str, Any]:
+    def _get_json(self, url: str, params: dict[str, str], psu_headers: dict[str, str] | None) -> dict[str, Any]:
         """
         GET with a bounded, jittered retry on *transient* failures only.
 
@@ -136,9 +143,9 @@ class EnableBankingClient:
         last_exc: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
-                resp = requests.get(url, params=params,
-                                    headers={**self._headers(), **(psu_headers or {})},
-                                    timeout=HTTP_TIMEOUT)
+                resp = requests.get(
+                    url, params=params, headers={**self._headers(), **(psu_headers or {})}, timeout=HTTP_TIMEOUT
+                )
             except requests.RequestException as exc:
                 last_exc = exc  # no response at all (DNS/connect/timeout) — transient
             else:
@@ -148,15 +155,21 @@ class EnableBankingClient:
                     resp.raise_for_status()  # 4xx — fail fast, do not retry
                 last_exc = requests.HTTPError(f"{resp.status_code} server error", response=resp)
             if attempt < self.max_retries:
-                delay = self.retry_backoff * (2 ** attempt) * (1 + random.random() * 0.5)
-                log.warning("bank GET failed (attempt %d/%d), retry in %.1fs: %s",
-                            attempt + 1, self.max_retries + 1, delay, last_exc)
+                delay = self.retry_backoff * (2**attempt) * (1 + random.random() * 0.5)
+                log.warning(
+                    "bank GET failed (attempt %d/%d), retry in %.1fs: %s",
+                    attempt + 1,
+                    self.max_retries + 1,
+                    delay,
+                    last_exc,
+                )
                 time.sleep(delay)
         assert last_exc is not None
         raise last_exc
 
-    def iter_transactions(self, account_uid: str, date_from: str,
-                          psu_headers: dict[str, str] | None = None) -> Iterator[dict[str, Any]]:
+    def iter_transactions(
+        self, account_uid: str, date_from: str, psu_headers: dict[str, str] | None = None
+    ) -> Iterator[dict[str, Any]]:
         """
         Yield raw transaction dicts, following continuation_key pagination.
 
@@ -177,8 +190,11 @@ class EnableBankingClient:
                 return
             params = {"date_from": date_from, "continuation_key": continuation}
         self.truncated_accounts.add(account_uid)
-        log.warning("account %s: hit max_pages=%d — stopping pagination (runaway continuation_key?)",
-                    account_uid, self.max_pages)
+        log.warning(
+            "account %s: hit max_pages=%d — stopping pagination (runaway continuation_key?)",
+            account_uid,
+            self.max_pages,
+        )
 
 
 # ── Mapping (pure) ────────────────────────────────────────────────────────
@@ -198,8 +214,7 @@ def map_api_transaction(txn: dict[str, Any], account_uid: str) -> dict[str, Any]
         return None
     booking_date = txn.get("booking_date") or txn.get("value_date")
     if not booking_date:
-        log.warning("skipping transaction without booking/value date: %s",
-                    txn.get("entry_reference"))
+        log.warning("skipping transaction without booking/value date: %s", txn.get("entry_reference"))
         return None
 
     amount_info = txn.get("transaction_amount") or {}
@@ -247,8 +262,8 @@ def check_and_consume_allowance(conn, limit: int) -> bool:
     """
     today = datetime.now(db.TZ).date().isoformat()
     key = state_keys.api_calls(today)
-    conn.commit()                     # close any implicit txn before the atomic RMW
-    conn.execute("BEGIN IMMEDIATE")   # serialize 4 crons + /sync + callback loop
+    conn.commit()  # close any implicit txn before the atomic RMW
+    conn.execute("BEGIN IMMEDIATE")  # serialize 4 crons + /sync + callback loop
     used = int(db.get_state(conn, key, "0") or "0")
     if used >= limit:
         conn.rollback()
@@ -277,11 +292,15 @@ def warn_if_consent_expiring(conn, warn_days: int, dry_run: bool) -> None:
     if days_left > warn_days:
         return
     if days_left < 0:
-        message = (f"🔴 Sentinel: bank consent EXPIRED {-days_left} day(s) ago ({expiry_raw[:10]}). "
-                   "Polls fail until you re-auth via the Phase 0 runbook (~2 min).")
+        message = (
+            f"🔴 Sentinel: bank consent EXPIRED {-days_left} day(s) ago ({expiry_raw[:10]}). "
+            "Polls fail until you re-auth via the Phase 0 runbook (~2 min)."
+        )
     else:
-        message = (f"⚠️ Sentinel: bank consent expires in {days_left} day(s) "
-                   f"({expiry_raw[:10]}). Re-auth via the Phase 0 runbook (~2 min).")
+        message = (
+            f"⚠️ Sentinel: bank consent expires in {days_left} day(s) "
+            f"({expiry_raw[:10]}). Re-auth via the Phase 0 runbook (~2 min)."
+        )
     log.warning(message)
     if dry_run:
         return
@@ -315,7 +334,8 @@ def warn_on_auth_error(conn, exc: Exception) -> None:
     try:
         telegram.send_message(
             f"🔴 Sentinel: the bank rejected the last pull (HTTP {status} — consent expired "
-            "or revoked). Re-auth via the Phase 0 runbook (~2 min).")
+            "or revoked). Re-auth via the Phase 0 runbook (~2 min)."
+        )
     except telegram.NotifyError as e:
         log.warning("consent-error notice not sent: %s", e)
         return
@@ -355,8 +375,7 @@ def run_ingest(
         if date_from:
             since = date_from
         elif cursor_date:
-            since = (date.fromisoformat(cursor_date[:10])
-                     - timedelta(days=cursor_overlap_days)).isoformat()
+            since = (date.fromisoformat(cursor_date[:10]) - timedelta(days=cursor_overlap_days)).isoformat()
         else:
             since = default_from
         if first_pull and not dry_run:
@@ -386,8 +405,14 @@ def run_ingest(
         inserted, submitted = db.insert_transactions(conn, rows)
         total_inserted += inserted
         total_submitted += submitted
-        log.info("account %s: since %s, %d fetched, %d new, %d duplicate",
-                 uid, since, submitted, inserted, submitted - inserted)
+        log.info(
+            "account %s: since %s, %d fetched, %d new, %d duplicate",
+            uid,
+            since,
+            submitted,
+            inserted,
+            submitted - inserted,
+        )
         truncated = uid in getattr(client, "truncated_accounts", set())
         if truncated:
             # The page cap was hit, so an older window went unfetched. If the bank
@@ -418,7 +443,9 @@ def build_client(cfg: dict[str, Any], app_id: str, key_path: str) -> EnableBanki
     """
     eb = cfg.get("enable_banking") or {}
     return EnableBankingClient(
-        app_id, key_path, eb.get("base_url", DEFAULT_BASE_URL),
+        app_id,
+        key_path,
+        eb.get("base_url", DEFAULT_BASE_URL),
         max_retries=int(eb.get("max_retries", 2)),
         retry_backoff=float(eb.get("retry_backoff_seconds", 1.5)),
         max_pages=int(eb.get("max_pages", 50)),
@@ -427,10 +454,12 @@ def build_client(cfg: dict[str, Any], app_id: str, key_path: str) -> EnableBanki
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Pull transactions from Enable Banking into the ledger.")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="fetch but roll back all writes (still consumes one API-allowance unit)")
-    parser.add_argument("--from", dest="date_from", default=None, metavar="ISO_DATE",
-                        help="override the cursor start date")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="fetch but roll back all writes (still consumes one API-allowance unit)"
+    )
+    parser.add_argument(
+        "--from", dest="date_from", default=None, metavar="ISO_DATE", help="override the cursor start date"
+    )
     parser.add_argument("--db", default=None, help="database path (default: config db_path)")
     parser.add_argument("--config", default=None, help="path to config.yaml")
     args = parser.parse_args(argv)
@@ -449,9 +478,11 @@ def main(argv: list[str] | None = None) -> int:
         key_path = os.environ.get("ENABLE_BANKING_PRIVATE_KEY_PATH")
         uids_raw = db.get_state(conn, state_keys.EB_ACCOUNT_UIDS)
         if not app_id or not key_path or not uids_raw:
-            log.error("Phase 0 incomplete: need ENABLE_BANKING_APP_ID + "
-                      "ENABLE_BANKING_PRIVATE_KEY_PATH in .env and eb_account_uids "
-                      "in state (SPEC §6 runbook)")
+            log.error(
+                "Phase 0 incomplete: need ENABLE_BANKING_APP_ID + "
+                "ENABLE_BANKING_PRIVATE_KEY_PATH in .env and eb_account_uids "
+                "in state (SPEC §6 runbook)"
+            )
             return 2
         if not Path(key_path).is_file():
             log.error("private key not found at %s (path only, key stays outside the repo)", key_path)
@@ -460,19 +491,19 @@ def main(argv: list[str] | None = None) -> int:
         if not check_and_consume_allowance(conn, int(eb_cfg.get("api_daily_call_limit", 4))):
             return 3
 
-        default_from = (
-            datetime.now(db.TZ).date()
-            - timedelta(days=int(eb_cfg.get("first_pull_days", 90)))
-        ).isoformat()
+        default_from = (datetime.now(db.TZ).date() - timedelta(days=int(eb_cfg.get("first_pull_days", 90)))).isoformat()
         client = build_client(cfg, app_id, key_path)
         inserted, submitted = run_ingest(
-            conn, client, json.loads(uids_raw),
-            default_from=default_from, date_from=args.date_from, dry_run=args.dry_run,
+            conn,
+            client,
+            json.loads(uids_raw),
+            default_from=default_from,
+            date_from=args.date_from,
+            dry_run=args.dry_run,
             cursor_overlap_days=int(eb_cfg.get("cursor_overlap_days", 5)),
             currency=cfg.get("currency", "EUR"),
         )
-        log.info("ingest %s: %d new / %d fetched",
-                 "dry-run" if args.dry_run else "done", inserted, submitted)
+        log.info("ingest %s: %d new / %d fetched", "dry-run" if args.dry_run else "done", inserted, submitted)
         return 0
     finally:
         conn.close()

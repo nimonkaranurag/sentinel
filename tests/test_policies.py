@@ -9,12 +9,20 @@ def _ledger(tmp_path, category, name, day_amounts):
     conn = db.connect(tmp_path / "ledger.db")
     db.init_db(conn)
     cur = conn.execute(
-        "INSERT INTO merchants (name_normalized, category, categorized_by) VALUES (?, ?, 'dict')",
-        (name, category))
+        "INSERT INTO merchants (name_normalized, category, categorized_by) VALUES (?, ?, 'dict')", (name, category)
+    )
     mid = cur.lastrowid
-    rows = [{"account_id": "a", "booking_date": d, "amount_cents": c,
-             "merchant_raw": name, "merchant_id": mid, "source": "api"}
-            for d, c in day_amounts]
+    rows = [
+        {
+            "account_id": "a",
+            "booking_date": d,
+            "amount_cents": c,
+            "merchant_raw": name,
+            "merchant_id": mid,
+            "source": "api",
+        }
+        for d, c in day_amounts
+    ]
     db.insert_transactions(conn, rows)
     conn.commit()
     ids = [r[0] for r in conn.execute("SELECT id FROM transactions ORDER BY booking_date")]
@@ -40,15 +48,13 @@ def test_missing_matcher_is_a_crash(tmp_path):
 
 
 def test_unknown_key_is_a_crash(tmp_path):
-    p = _policies_file(tmp_path,
-        "policies:\n  - name: x\n    cap_monthly_cents: 100\n    bucket: Other\n    typo: 1\n")
+    p = _policies_file(tmp_path, "policies:\n  - name: x\n    cap_monthly_cents: 100\n    bucket: Other\n    typo: 1\n")
     with pytest.raises(ValueError, match="unknown key"):
         policies.load_policies(p)
 
 
 def test_bad_bucket_is_a_crash(tmp_path):
-    p = _policies_file(tmp_path,
-        "policies:\n  - name: x\n    cap_monthly_cents: 100\n    bucket: Nonsense\n")
+    p = _policies_file(tmp_path, "policies:\n  - name: x\n    cap_monthly_cents: 100\n    bucket: Nonsense\n")
     with pytest.raises(ValueError, match="bucket"):
         policies.load_policies(p)
 
@@ -58,8 +64,9 @@ def test_bad_bucket_is_a_crash(tmp_path):
 
 def test_alert_fires_only_once_cap_is_crossed(tmp_path):
     # €60 + €60 + €60 FoodDelivery vs a €150 cap → only the 3rd (€180 MTD) alerts.
-    conn, ids = _ledger(tmp_path, "FoodDelivery", "DELIVEROO",
-                        [("2026-07-01", -6000), ("2026-07-02", -6000), ("2026-07-03", -6000)])
+    conn, ids = _ledger(
+        tmp_path, "FoodDelivery", "DELIVEROO", [("2026-07-01", -6000), ("2026-07-02", -6000), ("2026-07-03", -6000)]
+    )
     alerts = policies.evaluate(conn, {}, date(2026, 7, 3), ids, path=_policies_file(tmp_path, FOOD))
     assert len(alerts) == 1
     a = alerts[0]
@@ -73,7 +80,7 @@ def test_alert_fires_only_once_cap_is_crossed(tmp_path):
 def test_only_new_txns_alert(tmp_path):
     conn, ids = _ledger(tmp_path, "FoodDelivery", "DELIVEROO", [("2026-07-01", -20000)])
     pol = _policies_file(tmp_path, FOOD)
-    assert policies.evaluate(conn, {}, date(2026, 7, 1), [], path=pol) == []       # nothing new
+    assert policies.evaluate(conn, {}, date(2026, 7, 1), [], path=pol) == []  # nothing new
     assert len(policies.evaluate(conn, {}, date(2026, 7, 1), ids, path=pol)) == 1  # this txn is new
     conn.close()
 

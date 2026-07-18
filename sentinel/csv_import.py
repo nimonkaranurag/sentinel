@@ -109,7 +109,9 @@ def _resolve_header(fieldnames: list[str]) -> dict[str, str]:
 
 
 def row_to_transaction(
-    row: dict[str, str], columns: dict[str, Any], account_map: dict[str, str],
+    row: dict[str, str],
+    columns: dict[str, Any],
+    account_map: dict[str, str],
     currency: str = "EUR",
 ) -> dict[str, Any] | None:
     """
@@ -135,14 +137,14 @@ def row_to_transaction(
     if debit_raw:
         cents -= abs(db.to_cents(debit_raw))
     if debit_raw and credit_raw:
-        log.warning("row has both debit and credit; using net %s: %r",
-                    db.cents_to_str(cents), row)
+        log.warning("row has both debit and credit; using net %s: %r", db.cents_to_str(cents), row)
     if cents == 0:
         return None  # €0 line (e.g. AIB's "8.60 USD@" FX annotation) — not a spend
 
-    description = " ".join(
-        part for part in ((row.get(col) or "").strip() for col in columns["descriptions"]) if part
-    ).strip() or None
+    description = (
+        " ".join(part for part in ((row.get(col) or "").strip() for col in columns["descriptions"]) if part).strip()
+        or None
+    )
 
     csv_account = (row.get(columns["account"]) or "").strip()
     account_id = account_map.get(csv_account, csv_account)
@@ -181,17 +183,18 @@ def compute_clip_before(conn) -> str | None:
     backdated-outlier case) do we fall back to the recorded start. Returns None
     when no API rows exist yet, allowing a full import.
     """
-    row = conn.execute(
-        "SELECT MIN(booking_date) AS lo FROM transactions WHERE source = 'api'"
-    ).fetchone()
+    row = conn.execute("SELECT MIN(booking_date) AS lo FROM transactions WHERE source = 'api'").fetchone()
     min_api = row["lo"] if row and row["lo"] else None
     if min_api is None:
         return None
     coverage_start = db.get_state(conn, state_keys.API_COVERAGE_START)
     if coverage_start and min_api < coverage_start[:10]:
-        log.warning("earliest API booking %s precedes coverage start %s (backdated row?) — "
-                    "clipping at the coverage start so one old row can't amputate the backfill",
-                    min_api, coverage_start[:10])
+        log.warning(
+            "earliest API booking %s precedes coverage start %s (backdated row?) — "
+            "clipping at the coverage start so one old row can't amputate the backfill",
+            min_api,
+            coverage_start[:10],
+        )
         return coverage_start[:10]
     return min_api
 
@@ -216,8 +219,9 @@ def _read_csv_rows(path: Path) -> csv.DictReader:
     return csv.DictReader(io.StringIO(text))
 
 
-def import_file(conn, path: str | Path, account_map: dict[str, str],
-                clip_before: str | None = None, currency: str = "EUR") -> tuple[int, int, int]:
+def import_file(
+    conn, path: str | Path, account_map: dict[str, str], clip_before: str | None = None, currency: str = "EUR"
+) -> tuple[int, int, int]:
     """
     Import one CSV. Returns (inserted, submitted, skipped). Does not commit.
 
@@ -248,9 +252,17 @@ def import_file(conn, path: str | Path, account_map: dict[str, str],
         else:
             rows.append(mapped)
     inserted, submitted = db.insert_transactions(conn, rows)
-    log.info("%s: %d rows, %d new, %d duplicate, %d skipped, %d quarantined, %d clipped(>=API %s)",
-             path.name, submitted, inserted, submitted - inserted, skipped, quarantined,
-             clipped, clip_before or "-")
+    log.info(
+        "%s: %d rows, %d new, %d duplicate, %d skipped, %d quarantined, %d clipped(>=API %s)",
+        path.name,
+        submitted,
+        inserted,
+        submitted - inserted,
+        skipped,
+        quarantined,
+        clipped,
+        clip_before or "-",
+    )
     return inserted, submitted, skipped
 
 
@@ -284,9 +296,13 @@ def main(argv: list[str] | None = None) -> int:
             log.info("dry-run: rolled back %d would-be inserts", total_inserted)
         else:
             conn.commit()
-        log.info("backfill %s: %d new / %d parsed across %d file(s)",
-                 "dry-run" if args.dry_run else "done",
-                 total_inserted, total_submitted, len(args.files))
+        log.info(
+            "backfill %s: %d new / %d parsed across %d file(s)",
+            "dry-run" if args.dry_run else "done",
+            total_inserted,
+            total_submitted,
+            len(args.files),
+        )
         return 0
     finally:
         conn.close()

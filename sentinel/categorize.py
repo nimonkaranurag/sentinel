@@ -33,9 +33,26 @@ log = logging.getLogger(__name__)
 # Two-tier taxonomy: fine SUB-LABELS for display/relabeling roll up into 6 coarse
 # BUCKETS (see bucket()) used for all money math.
 TAXONOMY = (
-    "Rent", "Utilities", "Groceries", "Dining", "FoodDelivery", "Coffee/Snacks",
-    "Transport", "Subscriptions", "Health/Fitness", "Tools", "Shopping", "Cash",
-    "Dates", "Travel", "Gifts", "Fees", "Transfers", "Income", "Other", "Uncategorized",
+    "Rent",
+    "Utilities",
+    "Groceries",
+    "Dining",
+    "FoodDelivery",
+    "Coffee/Snacks",
+    "Transport",
+    "Subscriptions",
+    "Health/Fitness",
+    "Tools",
+    "Shopping",
+    "Cash",
+    "Dates",
+    "Travel",
+    "Gifts",
+    "Fees",
+    "Transfers",
+    "Income",
+    "Other",
+    "Uncategorized",
 )
 
 BUCKETS = ("Income", "Transfers", "Fixed", "Groceries", "FoodDelivery", "Other")
@@ -44,10 +61,16 @@ BUCKETS = ("Income", "Transfers", "Fixed", "Groceries", "FoodDelivery", "Other")
 # Uncategorized) falls to Other = the discretionary pool. FoodDelivery and
 # Groceries are split out as watched leaks; Fixed is committed/recurring spend.
 _BUCKET_OF = {
-    "Income": "Income", "Transfers": "Transfers",
-    "Rent": "Fixed", "Utilities": "Fixed", "Tools": "Fixed",
-    "Health/Fitness": "Fixed", "Subscriptions": "Fixed", "Fees": "Fixed",
-    "Groceries": "Groceries", "FoodDelivery": "FoodDelivery",
+    "Income": "Income",
+    "Transfers": "Transfers",
+    "Rent": "Fixed",
+    "Utilities": "Fixed",
+    "Tools": "Fixed",
+    "Health/Fitness": "Fixed",
+    "Subscriptions": "Fixed",
+    "Fees": "Fixed",
+    "Groceries": "Groceries",
+    "FoodDelivery": "FoodDelivery",
 }
 
 
@@ -81,8 +104,7 @@ def _compile_rules_file(rules_path: Path) -> list[tuple[re.Pattern, str]]:
     for i, entry in enumerate(raw.get("rules", [])):
         category = entry.get("category")
         if category not in TAXONOMY:
-            raise ValueError(f"{rules_path} rule #{i + 1}: category {category!r} "
-                             f"is not in the SPEC §3 taxonomy")
+            raise ValueError(f"{rules_path} rule #{i + 1}: category {category!r} is not in the SPEC §3 taxonomy")
         compiled.append((re.compile(entry["pattern"]), category))
     return compiled
 
@@ -159,9 +181,13 @@ def link_transactions(conn) -> int:
         if not name:
             continue
         if name in raw_for_name and raw_for_name[name] != row["merchant_raw"]:
-            log.warning("merchant-key collision: %r and %r both normalize to %r — policies "
-                        "and labels will treat them as one merchant",
-                        raw_for_name[name], row["merchant_raw"], name)
+            log.warning(
+                "merchant-key collision: %r and %r both normalize to %r — policies "
+                "and labels will treat them as one merchant",
+                raw_for_name[name],
+                row["merchant_raw"],
+                name,
+            )
         raw_for_name.setdefault(name, row["merchant_raw"])
         conn.execute(
             "INSERT OR IGNORE INTO merchants (name_normalized, first_seen) VALUES (?, ?)",
@@ -224,8 +250,7 @@ def _apply_cascade(conn, cfg: dict[str, Any]) -> dict[str, Any]:
     map_path = Path(cat_cfg.get("merchant_map_path") or DEFAULT_MERCHANT_MAP_PATH)
     merchant_map = load_merchant_map(map_path)
 
-    stats: dict[str, Any] = {"linked": link_transactions(conn),
-                             "by_dict": 0, "by_regex": 0, "novel_unresolved": 0}
+    stats: dict[str, Any] = {"linked": link_transactions(conn), "by_dict": 0, "by_regex": 0, "novel_unresolved": 0}
 
     pending = conn.execute(
         "SELECT name_normalized FROM merchants "
@@ -257,17 +282,23 @@ def _apply_cascade(conn, cfg: dict[str, Any]) -> dict[str, Any]:
 
     stats["novel_unresolved"] = len(novel)
     if novel:
-        log.info("%d merchant(s) unresolved (no map/rule hit) — discretionary pool "
-                 "until labeled via Telegram or rules.local.yaml", len(novel))
+        log.info(
+            "%d merchant(s) unresolved (no map/rule hit) — discretionary pool "
+            "until labeled via Telegram or rules.local.yaml",
+            len(novel),
+        )
     return stats
 
 
 def _log_cascade(conn, cfg: dict[str, Any], as_of: date, stats: dict[str, Any]) -> dict[str, Any]:
     window = int((cfg.get("categorize") or {}).get("coverage_window_days", 90))
     stats.update(coverage_stats(conn, as_of, window))
-    log.info("cascade: %(linked)d linked · %(by_dict)d dict · %(by_regex)d regex · "
-             "%(novel_unresolved)d unresolved · "
-             "90d coverage %(count_pct).1f%% by count / %(value_pct).1f%% by value", stats)
+    log.info(
+        "cascade: %(linked)d linked · %(by_dict)d dict · %(by_regex)d regex · "
+        "%(novel_unresolved)d unresolved · "
+        "90d coverage %(count_pct).1f%% by count / %(value_pct).1f%% by value",
+        stats,
+    )
     return stats
 
 
@@ -289,8 +320,7 @@ def run(conn, cfg: dict[str, Any], dry_run: bool = False, as_of: date | None = N
     return _log_cascade(conn, cfg, as_of, stats)
 
 
-def relink(conn, cfg: dict[str, Any], as_of: date | None = None,
-           dry_run: bool = False) -> dict[str, Any]:
+def relink(conn, cfg: dict[str, Any], as_of: date | None = None, dry_run: bool = False) -> dict[str, Any]:
     """
     Clear every merchant link and row and rebuild from scratch in a single
     transaction. Run after a normalizer or rule change.
@@ -310,8 +340,11 @@ def relink(conn, cfg: dict[str, Any], as_of: date | None = None,
     result = _log_cascade(conn, cfg, as_of, stats)  # read the rebuilt state before commit/rollback
     if dry_run:
         conn.rollback()
-        log.info("dry-run relink: would clear %d merchant row(s) and rebuild %d link(s) — rolled back",
-                 cleared, stats["linked"])
+        log.info(
+            "dry-run relink: would clear %d merchant row(s) and rebuild %d link(s) — rolled back",
+            cleared,
+            stats["linked"],
+        )
     else:
         conn.commit()
         log.info("relink: cleared %d merchant row(s), rebuilt %d link(s)", cleared, stats["linked"])
@@ -320,18 +353,21 @@ def relink(conn, cfg: dict[str, Any], as_of: date | None = None,
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Categorize transactions via the SPEC §3 cascade.")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="report what would change; write nothing")
-    parser.add_argument("--relink", action="store_true",
-                        help="clear merchants + merchant_id and rebuild from scratch, "
-                             "atomically, preserving owner labels (run after a "
-                             "normalizer/rule change)")
+    parser.add_argument("--dry-run", action="store_true", help="report what would change; write nothing")
+    parser.add_argument(
+        "--relink",
+        action="store_true",
+        help="clear merchants + merchant_id and rebuild from scratch, "
+        "atomically, preserving owner labels (run after a "
+        "normalizer/rule change)",
+    )
     parser.add_argument("--db", default=None)
     parser.add_argument("--config", default=None)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
     from dotenv import load_dotenv
+
     load_dotenv()
 
     cfg = db.load_config(args.config)

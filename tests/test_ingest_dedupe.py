@@ -93,15 +93,11 @@ def _total_sum(conn):
 
 def test_gate_ingest_twice_changes_zero_rows(conn):
     client = FakeClient()
-    inserted_1, submitted_1 = ingest.run_ingest(
-        conn, client, [API_ACCOUNT_UID], default_from="2026-01-01"
-    )
+    inserted_1, submitted_1 = ingest.run_ingest(conn, client, [API_ACCOUNT_UID], default_from="2026-01-01")
     assert inserted_1 == submitted_1 == EB_BOOKED_COUNT
     count_after_first, sum_after_first = _row_count(conn), _total_sum(conn)
 
-    inserted_2, submitted_2 = ingest.run_ingest(
-        conn, client, [API_ACCOUNT_UID], default_from="2026-01-01"
-    )
+    inserted_2, submitted_2 = ingest.run_ingest(conn, client, [API_ACCOUNT_UID], default_from="2026-01-01")
     assert inserted_2 == 0, "second ingest must change zero rows"
     assert submitted_2 == EB_BOOKED_COUNT
     assert _row_count(conn) == count_after_first
@@ -114,9 +110,7 @@ def test_gate_ingest_twice_changes_zero_rows(conn):
 def test_gate_sample_month_sum_matches_known_figure(conn):
     csv_import.import_file(conn, SAMPLE_CSV, ACCOUNT_MAP)
     conn.commit()
-    total = conn.execute(
-        "SELECT SUM(amount_cents) FROM transactions WHERE booking_date LIKE '2026-01-%'"
-    ).fetchone()[0]
+    total = conn.execute("SELECT SUM(amount_cents) FROM transactions WHERE booking_date LIKE '2026-01-%'").fetchone()[0]
     assert total == JAN_2026_SUM_CENTS
     assert _row_count(conn) == JAN_2026_ROW_COUNT
 
@@ -157,14 +151,10 @@ def test_api_csv_hash_dedupe_only_when_merchant_strings_coincide(conn):
     test_clip_before_prevents_cross_source_double_count."""
     csv_import.import_file(conn, SAMPLE_CSV, ACCOUNT_MAP)
     conn.commit()
-    inserted, submitted = ingest.run_ingest(
-        conn, FakeClient(), [API_ACCOUNT_UID], default_from="2026-01-01"
-    )
+    inserted, submitted = ingest.run_ingest(conn, FakeClient(), [API_ACCOUNT_UID], default_from="2026-01-01")
     assert submitted == EB_BOOKED_COUNT
     assert inserted == EB_BOOKED_COUNT - 1, "the overlapping LIDL row must be deduped"
-    lidl = conn.execute(
-        "SELECT COUNT(*), MIN(source) FROM transactions WHERE merchant_raw = 'LIDL DUBLIN'"
-    ).fetchone()
+    lidl = conn.execute("SELECT COUNT(*), MIN(source) FROM transactions WHERE merchant_raw = 'LIDL DUBLIN'").fetchone()
     assert tuple(lidl) == (1, "csv")
     assert _row_count(conn) == JAN_2026_ROW_COUNT + EB_BOOKED_COUNT - 1
 
@@ -190,19 +180,34 @@ def test_truncated_pagination_holds_the_cursor(conn):
     """On page-cap truncation, rows still land but the cursor must NOT advance
     past the unfetched (older) window, or those rows fall outside every future
     pull forever."""
-    client = _TruncatingClient([{
-        "entry_reference": "R1", "booking_date": "2026-02-09",
-        "transaction_amount": {"amount": "10.00", "currency": "EUR"},
-        "credit_debit_indicator": "DBIT", "status": "BOOK", "creditor": {"name": "SHOP"}}])
+    client = _TruncatingClient(
+        [
+            {
+                "entry_reference": "R1",
+                "booking_date": "2026-02-09",
+                "transaction_amount": {"amount": "10.00", "currency": "EUR"},
+                "credit_debit_indicator": "DBIT",
+                "status": "BOOK",
+                "creditor": {"name": "SHOP"},
+            }
+        ]
+    )
     inserted, _ = ingest.run_ingest(conn, client, [API_ACCOUNT_UID], default_from="2026-01-01")
     assert inserted == 1, "the fetched prefix still books"
     assert db.get_state(conn, state_keys.cursor(API_ACCOUNT_UID)) is None, "cursor held, not advanced"
 
 
 def test_non_eur_api_row_is_quarantined_and_recorded(conn):
-    payload = [{"entry_reference": "FX-1", "booking_date": "2026-02-01",
-                "transaction_amount": {"amount": "10.00", "currency": "USD"},
-                "credit_debit_indicator": "DBIT", "status": "BOOK", "creditor": {"name": "US SHOP"}}]
+    payload = [
+        {
+            "entry_reference": "FX-1",
+            "booking_date": "2026-02-01",
+            "transaction_amount": {"amount": "10.00", "currency": "USD"},
+            "credit_debit_indicator": "DBIT",
+            "status": "BOOK",
+            "creditor": {"name": "US SHOP"},
+        }
+    ]
     inserted, _ = ingest.run_ingest(conn, FakeClient(payload), [API_ACCOUNT_UID], default_from="2026-01-01")
     assert inserted == 0, "the non-EUR row must not book at face value"
     assert db.quarantine_count(conn) == 1, "it is retained in quarantine, not vaporized"
@@ -211,9 +216,15 @@ def test_non_eur_api_row_is_quarantined_and_recorded(conn):
 
 
 def test_sign_ambiguous_api_row_is_quarantined(conn):
-    payload = [{"entry_reference": "AMB-1", "booking_date": "2026-02-01",
-                "transaction_amount": {"amount": "10.00", "currency": "EUR"},
-                "status": "BOOK", "creditor": {"name": "MYSTERY"}}]  # no credit_debit_indicator
+    payload = [
+        {
+            "entry_reference": "AMB-1",
+            "booking_date": "2026-02-01",
+            "transaction_amount": {"amount": "10.00", "currency": "EUR"},
+            "status": "BOOK",
+            "creditor": {"name": "MYSTERY"},
+        }
+    ]  # no credit_debit_indicator
     inserted, _ = ingest.run_ingest(conn, FakeClient(payload), [API_ACCOUNT_UID], default_from="2026-01-01")
     assert inserted == 0, "a sign-ambiguous row must not be booked as a guessed sign"
     assert db.quarantine_count(conn) == 1

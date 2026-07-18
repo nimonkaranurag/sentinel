@@ -33,8 +33,14 @@ CASES = [
     # Enable Banking / AIB enrichment blob (embeds a per-txn timestamp) is cut,
     # so the same merchant on different days collapses to ONE key — dedup and the
     # recurring detector depend on this.
-    ("NETFLIX.COM { TRANSACTIONSUBTYPE : PURCHASE, PAYMENTINITIATIONDATETIME : 2026-05-04T09:00:00+01:00 }", "NETFLIX.COM"),
-    ("NETFLIX.COM { TRANSACTIONSUBTYPE : PURCHASE, PAYMENTINITIATIONDATETIME : 2026-06-04T09:00:00+01:00 }", "NETFLIX.COM"),
+    (
+        "NETFLIX.COM { TRANSACTIONSUBTYPE : PURCHASE, PAYMENTINITIATIONDATETIME : 2026-05-04T09:00:00+01:00 }",
+        "NETFLIX.COM",
+    ),
+    (
+        "NETFLIX.COM { TRANSACTIONSUBTYPE : PURCHASE, PAYMENTINITIATIONDATETIME : 2026-06-04T09:00:00+01:00 }",
+        "NETFLIX.COM",
+    ),
     ("PEARL BRASSERI { CATEGORYDETAIL : LEISURE & ENTERTAINMENT }", "PEARL BRASSERI"),
     # VDC-/VDA- AIB card prefixes (alongside VDP-)
     ("VDC-BOOTS RETAIL", "BOOTS RETAIL"),
@@ -60,8 +66,7 @@ def test_normalize_empty_inputs():
 
 
 def test_display_merchant_strips_the_enrichment_blob_but_keeps_case():
-    raw = ("NETFLIX.COM { TRANSACTIONSUBTYPE : PURCHASE, "
-           "PAYMENTINITIATIONDATETIME : 2026-05-15T23:37:13+01:00 }")
+    raw = "NETFLIX.COM { TRANSACTIONSUBTYPE : PURCHASE, PAYMENTINITIATIONDATETIME : 2026-05-15T23:37:13+01:00 }"
     assert display_merchant(raw) == "NETFLIX.COM"
     assert display_merchant("Tesco Stores 4368 Dublin") == "Tesco Stores 4368 Dublin"  # case kept
     assert display_merchant(None) == "" and display_merchant("") == ""
