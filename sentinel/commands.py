@@ -19,7 +19,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import alerts, bills, categorize, db, ingest, render, state_keys, telegram
+from . import alerts, bills, categorize, controller, db, ingest, render, state_keys, telegram
 
 log = logging.getLogger(__name__)
 
@@ -82,12 +82,45 @@ def do_date(conn, ref: str) -> str:
             f"'{txn['merchant_raw'] or 'merchant'}' keeps its usual category)")
 
 
+def do_paid_today(conn, cfg: dict[str, Any], arg: str, as_of: date) -> str:
+    """
+    Log the day this cycle's salary actually landed, overriding the nominal
+    payday for its month. Rolls the pay cycle (and resets the pool) to that date.
+
+    No argument = today; an optional ISO date lets the owner log it after the
+    fact. Sentinel keeps no holiday calendar — this is the manual escape hatch
+    for early (weekend/bank-holiday) or late pay.
+    """
+    arg = arg.strip()
+    if arg:
+        try:
+            when = date.fromisoformat(arg)
+        except ValueError:
+            return (f"Couldn't read {arg!r} as a date. Use /paid-today for today, or "
+                    f"/paid-today YYYY-MM-DD (e.g. /paid-today {as_of.isoformat()}).")
+    else:
+        when = as_of
+    year, month = controller.cycle_month_for(cfg, when)
+    db.set_state(conn, state_keys.payday_actual(year, month), when.isoformat())
+    conn.commit()
+    scheduled = controller.scheduled_payday(year, month, cfg)
+    cycle_end = controller.cycle_for(conn, cfg, when)["next_payday"] - timedelta(days=1)
+    note = ""
+    if when != scheduled:
+        off = (scheduled - when).days
+        early_late = f"{render.plural(abs(off), 'day')} {'early' if off > 0 else 'late'}"
+        note = f" ({render.fmt_day(scheduled)} payday, {early_late})"
+    return (f"✅ Logged payday: {render.fmt_day(when)}{note}.\n"
+            f"This pay cycle now runs {render.fmt_day(when)} → {render.fmt_day(cycle_end)} "
+            f"and resets your discretionary pool.")
+
+
 def do_sync(conn, cfg: dict[str, Any]) -> str:
     app_id = os.environ.get("ENABLE_BANKING_APP_ID")
     key_path = os.environ.get("ENABLE_BANKING_PRIVATE_KEY_PATH")
     uids_raw = db.get_state(conn, state_keys.EB_ACCOUNT_UIDS)
     if not app_id or not key_path or not uids_raw:
-        return "Enable Banking not configured yet — finish the Phase 0 runbook (SPEC §6)."
+        return "Bank sync isn't set up yet — finish the Phase 0 runbook (SPEC §6)."
     eb_cfg = cfg.get("enable_banking") or {}
     try:
         # /sync is owner-initiated: send PSU-present headers → attended access,
@@ -110,10 +143,10 @@ def do_sync(conn, cfg: dict[str, Any]) -> str:
         categorize.run(conn, cfg)
         fired = alerts.poll_alerts(conn, cfg, today)
         fired += bills.send_alerts(conn, cfg, today)  # late/drift bills fire here too
-        return f"Synced: {inserted} new / {submitted} fetched (attended); {fired} alert(s)."
+        return render.sync_reply(inserted, submitted, fired)
     except Exception as exc:  # bank errors must never crash the bot loop
         log.warning("/sync failed: %s", exc)
-        return f"Sync failed: {exc}"
+        return f"⚠️ Sync failed: {exc}\nNothing was changed — try again in a minute."
 
 
 def handle_command(conn, cfg: dict[str, Any], text: str, as_of: date) -> str:
@@ -134,6 +167,10 @@ def handle_command(conn, cfg: dict[str, Any], text: str, as_of: date) -> str:
             else "Usage: /recat <ref> <category>"
     if cmd == "/date":
         return do_date(conn, args[0]) if args else "Usage: /date <ref>"
+    # Telegram won't register a hyphen in a BotFather command menu, so accept the
+    # underscore/plain spellings too; /paid-today is what the docs show.
+    if cmd in ("/paid-today", "/paid_today", "/paidtoday"):
+        return do_paid_today(conn, cfg, " ".join(args), as_of)
     return render.HELP_TEXT
 
 

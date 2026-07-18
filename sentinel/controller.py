@@ -1,17 +1,26 @@
 """
 Safe-to-spend: the single daily figure.
 
-The monthly discretionary pool is one config value
-(`budgets.pool_monthly_cents`, set once by hand from the labeled history).
-Safe-to-spend is the remainder of that pool spread over the days left in the
-month:
+The discretionary pool is one config value (`budgets.pool_monthly_cents`, set
+once by hand from the labeled history). It is anchored to the owner's PAY CYCLE,
+not the calendar month: the pool resets on payday and safe-to-spend is what's
+left spread over the days until the *next* payday:
 
-    discretionary_MTD = month-to-date spend in the discretionary buckets
-                        (Groceries + FoodDelivery + Other)
-    safe_today        = max(0, (pool − discretionary_MTD) // days_left_incl_today)
+    cycle_start   = the payday on or before today (see `cycle_for`)
+    discretionary = cycle-to-date spend in the discretionary buckets
+                    (Groceries + FoodDelivery + Other)
+    days_left     = days from today until the next payday (>= 1)
+    safe_today    = max(0, (pool − discretionary) // days_left)
 
-`graduation_surplus` is a single query for the monthly report, recomputed from
-the ledger rather than stored as a streak. All amounts are integer cents.
+Payday is a nominal day-of-month (`payday.day_of_month`, default 23). Sentinel
+keeps no holiday calendar: when the bank pays early (a weekend/bank holiday) or
+late, the owner logs the real day with /paid-today, which writes a
+`payday_actual:<YYYY-MM>` override that `cycle_for` honours in place of the
+nominal day.
+
+`graduation_surplus` stays a calendar-month query for the monthly report,
+recomputed from the ledger rather than stored as a streak. All amounts are
+integer cents.
 
 CLI: python -m sentinel.controller [--as-of DATE] [--db PATH] [--config PATH]
 """
@@ -24,7 +33,7 @@ import logging
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from . import db
+from . import db, state_keys
 from .categorize import BUCKETS, DISCRETIONARY_BUCKETS, bucket
 
 log = logging.getLogger(__name__)
@@ -33,6 +42,75 @@ log = logging.getLogger(__name__)
 def month_bounds(as_of: date) -> tuple[date, date, int]:
     days = calendar.monthrange(as_of.year, as_of.month)[1]
     return as_of.replace(day=1), as_of.replace(day=days), days
+
+
+# ── Pay cycle (payday-anchored) ─────────────────────────────────────────────
+
+
+def payday_day(cfg: dict[str, Any]) -> int:
+    return int((cfg.get("payday") or {}).get("day_of_month", 23))
+
+
+def _add_months(year: int, month: int, delta: int) -> tuple[int, int]:
+    idx = year * 12 + (month - 1) + delta
+    return idx // 12, idx % 12 + 1
+
+
+def scheduled_payday(year: int, month: int, cfg: dict[str, Any]) -> date:
+    """
+    Return the nominal payday for a month, clamped to the month's last day (so a
+    day_of_month of 31 still lands in February).
+    """
+    last = calendar.monthrange(year, month)[1]
+    return date(year, month, min(payday_day(cfg), last))
+
+
+def _resolved_payday(conn, cfg: dict[str, Any], year: int, month: int) -> tuple[date, str]:
+    """
+    Return (payday, source) for one month: a logged /paid-today override if one
+    exists for that cycle, else the scheduled nominal payday.
+    """
+    override = db.get_state(conn, state_keys.payday_actual(year, month))
+    if override:
+        try:
+            return date.fromisoformat(override), "logged"
+        except ValueError:
+            log.warning("ignoring malformed logged payday %r for %d-%02d", override, year, month)
+    return scheduled_payday(year, month, cfg), "scheduled"
+
+
+def cycle_for(conn, cfg: dict[str, Any], as_of: date) -> dict[str, Any]:
+    """
+    Return the pay cycle containing `as_of`: its start (the payday on or before
+    today), the next payday, how many days remain until it (>= 1), and whether
+    the current cycle's start came from a logged /paid-today override.
+
+    The three-month bracket around `as_of` always contains a payday on each side,
+    so the cycle is well-defined for any date.
+    """
+    paydays = sorted(
+        (_resolved_payday(conn, cfg, *_add_months(as_of.year, as_of.month, k)) for k in (-1, 0, 1)),
+        key=lambda pd: pd[0],
+    )
+    start = max((pd for pd in paydays if pd[0] <= as_of), key=lambda pd: pd[0])
+    nxt = min((pd for pd in paydays if pd[0] > as_of), key=lambda pd: pd[0])
+    return {"cycle_start": start[0], "cycle_start_source": start[1],
+            "next_payday": nxt[0], "days_left": (nxt[0] - as_of).days}
+
+
+def cycle_month_for(cfg: dict[str, Any], when: date) -> tuple[int, int]:
+    """
+    Return the (year, month) whose scheduled payday is nearest `when` — the cycle
+    a /paid-today on `when` should override. Ties break to the earlier month.
+    """
+    best: tuple[int, int, int] | None = None
+    for k in (-1, 0, 1):
+        year, month = _add_months(when.year, when.month, k)
+        dist = abs((scheduled_payday(year, month, cfg) - when).days)
+        if best is None or dist < best[0]:
+            best = (dist, year, month)
+    assert best is not None
+    return best[1], best[2]
 
 
 def pool_cents(cfg: dict[str, Any]) -> int:
@@ -97,19 +175,25 @@ def unlabeled_inflows(conn, start: date, end: date, threshold_cents: int) -> tup
 def safe_to_spend(conn, cfg: dict[str, Any], as_of: date) -> dict[str, Any]:
     """
     Compute safe-to-spend and its components. Read-only; a pure function of the
-    ledger and the configured pool.
+    ledger, the configured pool, and the pay cycle (`cycle_for`).
+
+    Spend and unlabeled inflows are measured over the current pay cycle
+    (cycle_start → as_of), not the calendar month, so the pool resets on payday.
     """
-    month_start, _, days_in_month = month_bounds(as_of)
+    cycle = cycle_for(conn, cfg, as_of)
+    cycle_start: date = cycle["cycle_start"]
     exclude = unlabeled_inflow_exclude_cents(cfg)
-    spent = spend_by_bucket(conn, month_start, as_of, inflow_exclude_cents=exclude)
+    spent = spend_by_bucket(conn, cycle_start, as_of, inflow_exclude_cents=exclude)
     discretionary = sum(spent.get(b, 0) for b in DISCRETIONARY_BUCKETS)
     pool = pool_cents(cfg)
     remaining = pool - discretionary
-    days_left = days_in_month - as_of.day + 1
-    infl_n, infl_cents = unlabeled_inflows(conn, month_start, as_of, exclude)
+    days_left = cycle["days_left"]
+    infl_n, infl_cents = unlabeled_inflows(conn, cycle_start, as_of, exclude)
     return {
         "as_of": as_of.isoformat(),
-        "month": month_start.strftime("%Y-%m"),
+        "cycle_start": cycle_start.isoformat(),
+        "next_payday": cycle["next_payday"].isoformat(),
+        "cycle_start_source": cycle["cycle_start_source"],
         "days_left": days_left,
         "pool_cents": pool,
         "discretionary_spent_cents": discretionary,
@@ -175,9 +259,9 @@ def main(argv: list[str] | None = None) -> int:
         db.init_db(conn)
         as_of = date.fromisoformat(args.as_of) if args.as_of else datetime.now(db.TZ).date()
         s = safe_to_spend(conn, cfg, as_of)
-        log.info("safe to spend today: %s · %s of %s pool left · %d days",
+        log.info("safe to spend today: %s · %s of %s pool left · %d day(s) to payday (%s)",
                  db.fmt_eur(s["safe_today_cents"]), db.fmt_eur(s["remaining_cents"]),
-                 db.fmt_eur(s["pool_cents"]), s["days_left"])
+                 db.fmt_eur(s["pool_cents"]), s["days_left"], s["next_payday"])
         # The hard-rails runbook (docs/RAILS.md) funds a discretionary card with a
         # weekly standing order; this is the amount — the monthly pool spread over
         # a year of weeks. Round DOWN when you set the standing order.

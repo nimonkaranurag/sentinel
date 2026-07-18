@@ -7,9 +7,10 @@ import pytest
 from sentinel import commands, controller, db, notify, telegram
 from tests.test_reports import AS_OF, build_ledger
 
-PUSH_RE = re.compile(
-    r"^Safe to spend today: €[\d,]+\.\d{2} · -?€[\d,]+\.\d{2} left · (\d+) days · [🟢🟡🔴]$"
-)
+# /today and the daily push lead with the headline line, then a pool + payday
+# block; days-left lives in the "N days to payday" clause, not the headline.
+HEAD_RE = re.compile(r"^Safe to spend today: €[\d,]+\.\d{2}  [🟢🟡🔴]$", re.M)
+DAYS_RE = re.compile(r"(\d+) days? to payday")
 
 
 class FakeTelegram:
@@ -71,10 +72,10 @@ def test_daily_push_for_7_consecutive_days_live_and_idempotent(bot):
     conn, cfg, fake = bot
     for day in range(8, 15):  # 2026-07-08 … 2026-07-14
         assert notify.push_daily(conn, cfg, as_of=date(2026, 7, day)) is True
-    pushes = [m for m in fake.sent if PUSH_RE.match(m)]
+    pushes = [m for m in fake.sent if HEAD_RE.search(m)]
     assert len(pushes) == 7, fake.sent
-    days_left = [int(PUSH_RE.match(m).group(1)) for m in pushes]
-    assert days_left == [24, 23, 22, 21, 20, 19, 18], "numbers must be live, not canned"
+    days_left = [int(DAYS_RE.search(m).group(1)) for m in pushes]
+    assert days_left == [15, 14, 13, 12, 11, 10, 9], "days count down to payday (23rd), live"
     already = len(fake.sent)
     assert notify.push_daily(conn, cfg, as_of=date(2026, 7, 14)) is False
     assert len(fake.sent) == already
@@ -86,14 +87,18 @@ def test_daily_push_for_7_consecutive_days_live_and_idempotent(bot):
 def test_safe_to_spend_rolls_forward_and_punishes_overspend(tmp_path):
     conn = db.connect(tmp_path / "ledger.db")
     db.init_db(conn)
-    cfg = make_cfg(tmp_path)  # €1,200 pool
+    cfg = make_cfg(tmp_path)  # €1,200 pool, payday 23 (default)
+    # Underspend rolls forward: same (empty) ledger, one day closer to payday →
+    # the daily figure rises.
     day1 = controller.safe_to_spend(conn, cfg, date(2026, 7, 1))
     day2 = controller.safe_to_spend(conn, cfg, date(2026, 7, 2))
     assert day2["safe_today_cents"] > day1["safe_today_cents"], "underspend rolls forward"
-    assert day1["days_left"] == 31
+    assert day1["days_left"] == 22, "2026-07-01 → next payday 2026-07-23"
+    assert day1["cycle_start"] == "2026-06-23" and day1["next_payday"] == "2026-07-23"
+    # Spending in-cycle drags the SAME day's figure below its no-spend baseline.
     _mk_spend(conn, "Groceries", "TESCO", [("2026-07-02", -5_000)])  # discretionary bucket
-    day2_over = controller.safe_to_spend(conn, cfg, date(2026, 7, 2))
-    assert day2_over["safe_today_cents"] < day1["safe_today_cents"], "overspend drags it down"
+    over2 = controller.safe_to_spend(conn, cfg, date(2026, 7, 2))
+    assert over2["safe_today_cents"] < day2["safe_today_cents"], "overspend drags it down"
     _mk_spend(conn, "Groceries", "TESCO2", [("2026-07-03", -200_000)])  # blow the pool
     assert controller.safe_to_spend(conn, cfg, date(2026, 7, 3))["safe_today_cents"] == 0
     conn.close()
@@ -191,7 +196,7 @@ def test_status_surfaces_quarantined_rows(bot):
     db.quarantine_row(conn, "api", "non-EUR booked currency 'USD'", {"ref": "x"}, "acc-uid-1")
     conn.commit()
     text = commands.handle_command(conn, cfg, "/status", AS_OF)
-    assert "1 row(s) quarantined" in text
+    assert "1 row quarantined" in text
 
 
 def test_labeled_refund_nets_but_large_unlabeled_inflow_does_not(tmp_path):
@@ -244,7 +249,7 @@ def test_process_updates_only_honors_owner_sender(bot):
 def test_unknown_command_returns_help(bot):
     conn, cfg, _ = bot
     reply = commands.handle_command(conn, cfg, "/frobnicate", AS_OF)
-    for cmd in ("/today", "/status", "/cat", "/sync", "/recat", "/date"):
+    for cmd in ("/today", "/status", "/cat", "/sync", "/recat", "/date", "/paid-today"):
         assert cmd in reply
 
 
@@ -274,7 +279,7 @@ def test_sync_replies_when_unconfigured_and_is_allowance_exempt(bot, monkeypatch
     # signing the JWT fails on the fake key (the sync-failed path), and the
     # allowance counter stays untouched because attended access never consumes it.
     reply = commands.do_sync(conn, cfg)
-    assert reply.startswith("Sync failed")
+    assert "Sync failed" in reply
     assert db.get_state(conn, f"api_calls:{today}") == "4", "attended /sync must not consume allowance"
 
 

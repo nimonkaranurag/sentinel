@@ -71,11 +71,14 @@ labeled through the relabel loop or `rules.local.yaml`.
    change). Lateness is measured against a real due date that rolls across month
    boundaries, so end-of-month bills are detectable.
 
-4. **Safe-to-spend** (`controller.py`) — one daily number:
-   `(discretionary pool − month-to-date discretionary spend) ÷ days remaining`.
-   Small refunds net against spend; a large unlabeled inflow (an unmapped
-   transfer) is held out of the pool until labeled, so it cannot inflate the
-   figure.
+4. **Safe-to-spend** (`controller.py`) — one daily number, anchored to your
+   **pay cycle** rather than the calendar month:
+   `(discretionary pool − cycle-to-date discretionary spend) ÷ days to next payday`.
+   The pool resets on payday (`payday.day_of_month`, default 23); when the bank
+   pays early or late, `/paid-today` logs the real day and the cycle rolls — no
+   holiday calendar. Small refunds net against spend; a large unlabeled inflow
+   (an unmapped transfer) is held out of the pool until labeled, so it cannot
+   inflate the figure.
 
 5. **Reports and pushes** (`notify.py`, `reports.py`) — the 08:00 safe-to-spend
    push, a Monday plan, and a deterministic Sunday digest (this week versus prior,
@@ -190,12 +193,13 @@ pointed at a group without letting other members drive the ledger — set
 
 | Command | Effect |
 | --- | --- |
-| `/today` | Safe-to-spend one-liner |
-| `/status` | Month-to-date spend by bucket, plus safe-to-spend |
+| `/today` | What's safe to spend today, with pool status and days to payday |
+| `/status` | This **pay cycle**'s spend by bucket, plus safe-to-spend |
 | `/cat <name>` | A category and this month's transactions (with refs) |
 | `/sync` | Attended bank pull (exempt from the daily unattended allowance) |
 | `/recat <ref> <category>` | Recategorize a transaction and teach its merchant |
 | `/date <ref>` | Mark one transaction as `Dates`, leaving the merchant untouched |
+| `/paid-today [date]` | Log the day your salary landed (early on a weekend/bank holiday, or late) so the pay cycle rolls to it |
 
 The inline `[✓ fine]` `[Reclassify…]` keyboard accompanies every alert. Answering
 commands and taps in real time needs the **listener** running (see Scheduling):

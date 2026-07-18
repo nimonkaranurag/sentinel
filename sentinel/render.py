@@ -19,16 +19,40 @@ from .normalize import display_merchant
 
 HELP_TEXT = (
     "Sentinel commands:\n"
-    "/today — safe-to-spend one-liner\n"
-    "/status — this month's spend by bucket + safe-to-spend\n"
+    "/today — what's safe to spend today\n"
+    "/status — this pay cycle's spend by bucket + safe-to-spend\n"
     "/cat <name> — one category + this month's transactions (with refs)\n"
-    "/sync — pull the bank now (attended; exempt from the daily allowance)\n"
+    "/sync — pull the bank now (exempt from the daily allowance)\n"
     "/recat <ref> <category> — correct a transaction AND its merchant\n"
-    "/date <ref> — mark one transaction as Dates (merchant untouched)"
+    "/date <ref> — mark one transaction as Dates (merchant untouched)\n"
+    "/paid-today [date] — log the day your salary landed (e.g. early on a "
+    "weekend/bank holiday) so the pay cycle rolls to it"
 )
 
 # Categories offered in the inline reclassify grid (everything but the sentinel).
 RELABEL_CHOICES = tuple(c for c in categorize.TAXONOMY if c != "Uncategorized")
+
+# Friendlier display labels for the money buckets (SPEC §3); others print as-is.
+BUCKET_LABELS = {"FoodDelivery": "Food delivery"}
+
+
+# ── Small text helpers ──────────────────────────────────────────────────────
+
+
+def plural(n: int, word: str, plural_word: str | None = None) -> str:
+    """
+    Format a count with its noun, pluralised: plural(1, "day") -> "1 day",
+    plural(3, "day") -> "3 days".
+    """
+    return f"{n} {word}" if n == 1 else f"{n} {plural_word or word + 's'}"
+
+
+def fmt_day(d: date) -> str:
+    """
+    Format a date for the chat surface as e.g. "Wed 23 Jul" (no leading zero,
+    locale-independent).
+    """
+    return f"{d.strftime('%a')} {d.day} {d.strftime('%b')}"
 
 
 # ── Daily / status ──────────────────────────────────────────────────────────
@@ -43,31 +67,88 @@ def traffic_light(cfg: dict[str, Any], safe_cents: int) -> str:
     return "🟡"
 
 
+def _payday_line(s: dict[str, Any]) -> str:
+    """
+    Return the "N days to payday (Wed 23 Jul)" clause shared by /today and
+    /status, noting when the current cycle started from a logged /paid-today.
+    """
+    days = plural(s["days_left"], "day")
+    when = fmt_day(date.fromisoformat(s["next_payday"]))
+    early = " · payday logged early" if s["cycle_start_source"] == "logged" else ""
+    return f"{days} to payday ({when}){early}"
+
+
 def compose_daily(conn, cfg: dict[str, Any], as_of: date) -> str:
-    status = controller.safe_to_spend(conn, cfg, as_of)
-    return (f"Safe to spend today: {fmt_eur(status['safe_today_cents'])} · "
-            f"{fmt_eur(status['remaining_cents'])} left · "
-            f"{status['days_left']} days · {traffic_light(cfg, status['safe_today_cents'])}")
+    """
+    Compose the /today reply and the daily 08:00 push: the headline number, a
+    plain-English pool status, and where you are in the pay cycle.
+    """
+    s = controller.safe_to_spend(conn, cfg, as_of)
+    badge = traffic_light(cfg, s["safe_today_cents"])
+    remaining = s["remaining_cents"]
+    if remaining >= 0:
+        pool_status = f"{fmt_eur(remaining)} left in your pool · {_payday_line(s)}"
+    else:
+        pool_status = f"⚠️ {fmt_eur(-remaining)} over your pool · {_payday_line(s)}"
+    spent_line = (f"Pool {fmt_eur(s['pool_cents'])} · {fmt_eur(s['discretionary_spent_cents'])} "
+                  f"spent since {fmt_day(date.fromisoformat(s['cycle_start']))}")
+    return (f"Safe to spend today: {fmt_eur(s['safe_today_cents'])}  {badge}\n\n"
+            f"{pool_status}\n{spent_line}")
 
 
 def status_text(conn, cfg: dict[str, Any], as_of: date) -> str:
+    """
+    Compose /status: the pay-cycle window, spend by bucket, the discretionary
+    pool, any holds (unlabeled inflow / quarantine), and today's number.
+    """
     s = controller.safe_to_spend(conn, cfg, as_of)
-    lines = [f"This month ({s['month']}, day {as_of.day}, {s['days_left']} left)"]
-    for b in categorize.BUCKETS:
-        spent = s["by_bucket_cents"].get(b, 0)
-        if spent:
-            lines.append(f"· {b}: {fmt_eur(spent)}")
-    lines.append(f"Discretionary: {fmt_eur(s['discretionary_spent_cents'])} of "
-                 f"{fmt_eur(s['pool_cents'])} pool")
+    cycle_start = date.fromisoformat(s["cycle_start"])
+    early = "  ·  payday logged early" if s["cycle_start_source"] == "logged" else ""
+    lines = [f"📊 This pay cycle{early}",
+             f"{fmt_day(cycle_start)} → {fmt_day(as_of)}  ·  {_payday_line(s)}", ""]
+
+    spent = [(BUCKET_LABELS.get(b, b), s["by_bucket_cents"].get(b, 0))
+             for b in categorize.BUCKETS if s["by_bucket_cents"].get(b, 0)]
+    if spent:
+        width = max(len(label) for label, _ in spent)
+        lines.append("Spent this cycle:")
+        lines += [f"  {label:<{width}}  {fmt_eur(cents)}" for label, cents in spent]
+        lines.append("")
+
+    remaining = s["remaining_cents"]
+    tail = (f"{fmt_eur(remaining)} left" if remaining >= 0
+            else f"⚠️ {fmt_eur(-remaining)} over")
+    lines.append(f"Discretionary pool: {fmt_eur(s['discretionary_spent_cents'])} spent of "
+                 f"{fmt_eur(s['pool_cents'])} — {tail}")
+
     if s.get("unlabeled_inflow_count"):
-        lines.append(f"⚠️ {fmt_eur(s['unlabeled_inflow_cents'])} unlabeled inflow "
-                     f"({s['unlabeled_inflow_count']}) — held out of the pool; /recat it to "
-                     f"Income/Transfers if a transfer, or to its merchant category if a refund.")
+        lines += ["",
+                  f"⚠️ {fmt_eur(s['unlabeled_inflow_cents'])} unlabeled inflow "
+                  f"({s['unlabeled_inflow_count']}) is held out of the pool.",
+                  "   /recat it to Income/Transfers, or to its merchant category if it's a refund."]
     quarantined = db.quarantine_count(conn)
     if quarantined:
-        lines.append(f"⚠️ {quarantined} row(s) quarantined (non-EUR or sign-ambiguous) — "
-                     f"not counted in any total; see the ingest log.")
-    lines.append(compose_daily(conn, cfg, as_of))
+        lines += ["", f"⚠️ {plural(quarantined, 'row')} quarantined (non-EUR or "
+                  "sign-ambiguous) — not counted in any total; see the ingest log."]
+
+    lines += ["", f"Safe to spend today: {fmt_eur(s['safe_today_cents'])}  "
+              f"{traffic_light(cfg, s['safe_today_cents'])}"]
+    return "\n".join(lines)
+
+
+def sync_reply(inserted: int, submitted: int, fired: int) -> str:
+    """
+    Plain-English summary of a /sync: how many new transactions landed (out of
+    how many the bank returned) and how many alerts fired.
+    """
+    if inserted:
+        lines = ["✅ Bank sync done.",
+                 f"• {plural(inserted, 'new transaction')} (checked {submitted})"]
+    else:
+        lines = ["✅ Bank sync done — you're already up to date.",
+                 f"• No new transactions (checked {submitted})"]
+    lines.append(f"• {plural(fired, 'new alert')} — see above ⬆️" if fired
+                 else "• No new alerts.")
     return "\n".join(lines)
 
 
