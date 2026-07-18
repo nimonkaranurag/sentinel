@@ -33,6 +33,10 @@ jobs:
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          # Owner-specific git-ignored config, materialized on the host each deploy
+          # so prod tracks the repo (see docs/DEPLOY.md). Unset = leave host as-is.
+          RULES_LOCAL_YAML: ${{ secrets.RULES_LOCAL_YAML }}
+          BILLS_LOCAL_YAML: ${{ secrets.BILLS_LOCAL_YAML }}
         run: |
           # Until a host is configured, skip cleanly (green) instead of failing
           # every push. Set the DEPLOY_* secrets to turn CD on (see docs/DEPLOY.md).
@@ -51,12 +55,29 @@ jobs:
             # (ssh-keyscan output) to verify the host key on every deploy instead.
             ssh_opts="-o StrictHostKeyChecking=accept-new"
           fi
+          # rules.local.yaml / bills.local.yaml are git-ignored PII, so `git reset
+          # --hard` can never ship them. Materialize them from repo secrets on every
+          # deploy so prod tracks the repo with no manual step and no drift. Content
+          # crosses the encrypted scp channel (never argv or logs); an unset secret is
+          # skipped, leaving whatever is already on the host untouched.
+          tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+          sync_local() {  # $1 = secret content, $2 = destination path on the host
+            [ -n "$1" ] || return 0
+            printf '%s' "$1" > "$tmp/payload"
+            scp $ssh_opts -i ~/.ssh/deploy_key "$tmp/payload" "$DEPLOY_USER@$DEPLOY_HOST:$2"
+          }
+          sync_local "$RULES_LOCAL_YAML" /opt/sentinel/sentinel/rules.local.yaml
+          sync_local "$BILLS_LOCAL_YAML" /opt/sentinel/sentinel/bills.local.yaml
           ssh $ssh_opts -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" 'bash -euo pipefail -s' <<'REMOTE'
           cd /opt/sentinel
           git fetch --prune origin
           git reset --hard origin/main            # ignored files (.env, ledger.db, *.local.yaml) are preserved
           uv sync                                 # rebuild .venv from the lockfile
           uv run python -m sentinel.db --init     # apply pending migrations (idempotent)
+          # Re-apply the cascade so a rules.yaml / rules.local.yaml change lands now,
+          # not only at the next poll. Atomic + preserves owner /recat labels;
+          # non-fatal so a bad rules edit can't wedge the deploy or the restart.
+          uv run python -m sentinel.categorize --relink || echo "::warning::relink failed — keeping existing labels"
           sudo systemctl restart sentinel-listen.service
           echo "deployed $(git rev-parse --short HEAD)"
           REMOTE
