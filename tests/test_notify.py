@@ -1,6 +1,6 @@
 import json
 import re
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 
@@ -264,6 +264,42 @@ def test_process_updates_only_honors_owner_sender(bot):
     assert handled == 1
     assert len(fake.sent) == 1 and fake.sent[0].startswith("Safe to spend today:")
     assert db.get_state(conn, "tg_update_offset") == "14"
+
+
+def test_listen_answers_each_update_as_of_the_live_date_not_startup(bot, monkeypatch):
+    """Regression: the always-on `--listen` process is long-lived and can outlive
+    midnight for days. Each update must be answered as of the *current* date, read
+    live, not a date frozen when the listener booted — otherwise /status shows a
+    'days to payday' that never counts down and a safe-to-spend that never advances
+    (the '5 days left' that was still 5 the next day)."""
+    conn, cfg, fake = bot
+    # The clock advances one calendar day between the two updates in this one batch,
+    # standing in for the listener crossing midnight while it keeps polling. `.date()`
+    # is the only attribute the loop reads; return the next day per call, clamped so a
+    # stray extra call can't StopIteration.
+    seq = [date(2026, 7, 18), date(2026, 7, 19)]
+    calls = {"n": 0}
+
+    class LiveClock:
+        @staticmethod
+        def now(tz=None):
+            d = seq[min(calls["n"], len(seq) - 1)]
+            calls["n"] += 1
+            return datetime(d.year, d.month, d.day, tzinfo=tz)
+
+    monkeypatch.setattr(commands, "datetime", LiveClock)
+    fake.updates = [
+        {"update_id": 41, "message": {"chat": {"id": 777}, "from": {"id": 777}, "text": "/status"}},
+        {"update_id": 42, "message": {"chat": {"id": 777}, "from": {"id": 777}, "text": "/status"}},
+    ]
+    # as_of=None is exactly what notify.py passes in production `--listen` (no --as-of).
+    handled = commands.process_updates(conn, cfg, as_of=None)
+    assert handled == 2
+    days_left = [int(re.search(r"\((\d+) days? left", m).group(1)) for m in fake.sent]
+    assert days_left == [5, 4], (
+        "payday is the 23rd: 18 Jul → 5 days, 19 Jul → 4 days. A frozen as_of reports "
+        f"[5, 5] (both as of boot day); got {days_left}."
+    )
 
 
 def test_unknown_command_returns_help(bot):
