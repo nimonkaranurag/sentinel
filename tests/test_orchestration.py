@@ -196,9 +196,60 @@ def test_post_telegram_non_json_reply_is_notifyerror(monkeypatch):
         def json(self):
             raise ValueError("Expecting value")  # HTML error page, not JSON
 
-    monkeypatch.setattr(telegram.requests, "post", lambda *a, **k: FakeResp())
+    class FakeSession:
+        def post(self, url, json, timeout):
+            return FakeResp()
+
+    monkeypatch.setattr(telegram, "_http", FakeSession)  # code posts via _http(), not requests.post
     with pytest.raises(telegram.NotifyError, match="non-JSON"):
         telegram._post_telegram("secret-token", "getUpdates", {})
+
+
+def test_getupdates_read_timeout_tracks_poll_timeout_short_calls_stay_snappy(monkeypatch):
+    """The long-poll read timeout must outlast the server-side poll wait (else a
+    healthy poll is cut off) and scale with it — so lowering poll_timeout_seconds
+    shrinks the deaf window. Every other call keeps the short read budget: a stuck
+    reply fails in seconds, not the ~65s that used to wedge the listener."""
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "777")
+
+    class OkResp:
+        status_code = 200
+
+        def json(self):
+            return {"ok": True, "result": []}
+
+    seen: dict[str, tuple[int, int]] = {}
+
+    class RecordingSession:
+        def post(self, url, json, timeout):
+            seen[url.rsplit("/", 1)[-1]] = timeout
+            return OkResp()
+
+    monkeypatch.setattr(telegram, "_http", RecordingSession)
+    telegram.get_updates(0, 25)  # server-side poll wait = 25s
+    telegram.send_message("hi")  # a prompt call
+    assert seen["getUpdates"] == (
+        telegram.CONNECT_TIMEOUT_SECONDS,
+        25 + telegram.LONG_POLL_READ_MARGIN_SECONDS,
+    ), "getUpdates read must be poll timeout + margin"
+    assert seen["sendMessage"] == (telegram.CONNECT_TIMEOUT_SECONDS, telegram.SHORT_READ_TIMEOUT_SECONDS)
+    assert seen["sendMessage"][1] < 65, "a short call must not inherit the old 65s long-poll patience"
+
+
+def test_transport_reuses_one_keepalive_session(monkeypatch):
+    """One pooled session is reused (no fresh DNS+TCP+TLS per reply) and its socket
+    carries SO_KEEPALIVE so a silently-dropped long-poll is detected by the kernel,
+    not only when the read timeout fires."""
+    import socket
+
+    monkeypatch.setattr(telegram, "_session", None)  # force a clean build; auto-restored
+    session = telegram._http()
+    assert telegram._http() is session, "the session is a reused singleton, not per-call"
+    adapter = session.get_adapter("https://api.telegram.org")
+    assert isinstance(adapter, telegram._KeepAliveAdapter)
+    sockopts = adapter.poolmanager.connection_pool_kw.get("socket_options") or []
+    assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1) in sockopts, "SO_KEEPALIVE must be set on pooled sockets"
 
 
 # ── Consent-expiry nag fires from the poll (N21) ────────────────────────────
