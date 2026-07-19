@@ -117,7 +117,12 @@ thresholds:                    # safe-to-spend traffic light (SPEC §4)
   red_cents: 1000              # 🔴 below this
 
 telegram:
-  poll_timeout_seconds: 50     # --listen long-poll timeout (bot token/chat id live in .env)
+  # --listen long-poll timeout. This bounds the worst case when the network
+  # silently drops the getUpdates socket: the bot is deaf until the HTTP read
+  # timeout (this + a margin) fires, so keep it modest. 25s reconnects twice as
+  # often as the old 50s (cheap over the keep-alive session) and roughly halves
+  # that deaf window. Bot token/chat id live in .env.
+  poll_timeout_seconds: 25
   # Backoff (seconds) after a transient getUpdates transport error in --listen,
   # so one network blip doesn't kill the loop. Jittered up to +50%.
   listen_backoff_seconds: 3

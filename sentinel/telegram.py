@@ -15,15 +15,84 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
 from typing import Any
 
 import requests
+from requests.adapters import HTTPAdapter
 
 log = logging.getLogger(__name__)
 
 TELEGRAM_API = "https://api.telegram.org"
-HTTP_TIMEOUT = 65  # > the long-poll timeout
 MAX_MESSAGE_CHARS = 4000
+
+# ── Transport timeouts (seconds) ────────────────────────────────────────────
+# Split by call shape. getUpdates is a long-poll: its server-side wait lives in
+# the request payload ('timeout'), and the HTTP read must outlast that wait by a
+# margin. EVERY OTHER call (sendMessage, editMessageText, answerCallbackQuery,
+# setMyCommands) returns promptly and must NOT inherit the long-poll's patience —
+# the old single fixed 65s meant a stuck reply could wedge the listener for over a
+# minute. Connect is generous (the network to Telegram is ~50ms) yet still fails
+# fast on a black-holed route.
+CONNECT_TIMEOUT_SECONDS = 10
+SHORT_READ_TIMEOUT_SECONDS = 20
+LONG_POLL_READ_MARGIN_SECONDS = 10
+
+# TCP keepalive on the pooled socket: this VPS route silently drops the getUpdates
+# long-poll (RST / read-timeout ~17x/day in prod). Keepalive lets the kernel notice
+# a dead peer in tens of seconds instead of only when the read timeout fires, and
+# catches half-open sockets a read timeout alone would miss. The idle/interval/count
+# knobs are Linux / newer-macOS only, so probe for each before setting it.
+_KEEPALIVE_SOCKET_OPTIONS: list[tuple[int, int, int]] = [
+    (socket.IPPROTO_TCP, socket.TCP_NODELAY, 1),
+    (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
+]
+for _opt_name, _opt_value in (("TCP_KEEPIDLE", 15), ("TCP_KEEPINTVL", 5), ("TCP_KEEPCNT", 3)):
+    _opt = getattr(socket, _opt_name, None)
+    if _opt is not None:
+        _KEEPALIVE_SOCKET_OPTIONS.append((socket.IPPROTO_TCP, _opt, _opt_value))
+
+
+class _KeepAliveAdapter(HTTPAdapter):
+    """HTTPAdapter that enables TCP keepalive (+ NODELAY) on every pooled socket."""
+
+    def init_poolmanager(self, connections: int, maxsize: int, block: bool = False, **pool_kwargs: Any) -> None:
+        pool_kwargs["socket_options"] = _KEEPALIVE_SOCKET_OPTIONS
+        super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+
+
+_session: requests.Session | None = None
+
+
+def _http() -> requests.Session:
+    """
+    Return the process-wide keep-alive session (one pooled TLS connection reused
+    across getUpdates and every reply), created lazily.
+
+    Reuse means a reply no longer pays a fresh DNS+TCP+TLS handshake, and the
+    pooled socket carries TCP keepalive so a dropped long-poll is noticed quickly.
+    Adapter retries are off: the --listen loop owns retry/backoff (per-update,
+    jittered), so urllib3 must not also retry underneath it.
+    """
+    global _session
+    if _session is None:
+        session = requests.Session()
+        adapter = _KeepAliveAdapter(max_retries=0)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        _session = session
+    return _session
+
+
+def _timeout_for(method: str, payload: dict[str, Any]) -> tuple[int, int]:
+    """
+    (connect, read) timeout for one Bot API call. getUpdates reads for its
+    server-side poll wait (payload['timeout']) plus a margin; every other method
+    uses the short read budget, so a stuck call fails fast instead of wedging.
+    """
+    if method == "getUpdates":
+        return CONNECT_TIMEOUT_SECONDS, int(payload.get("timeout", 0)) + LONG_POLL_READ_MARGIN_SECONDS
+    return CONNECT_TIMEOUT_SECONDS, SHORT_READ_TIMEOUT_SECONDS
 
 
 class NotifyError(RuntimeError):
@@ -70,7 +139,7 @@ def _post_telegram(token: str, method: str, payload: dict[str, Any]) -> dict[str
     non-JSON reply, or non-ok response.
     """
     try:
-        resp = requests.post(f"{TELEGRAM_API}/bot{token}/{method}", json=payload, timeout=HTTP_TIMEOUT)
+        resp = _http().post(f"{TELEGRAM_API}/bot{token}/{method}", json=payload, timeout=_timeout_for(method, payload))
     except requests.RequestException as exc:
         raise NotifyError(f"telegram {method} transport error: {redact(str(exc), token)}") from None
     try:
