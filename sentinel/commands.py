@@ -280,7 +280,12 @@ def process_updates(
     persisted), so listen+dry-run cannot busy-spin re-reading the same batch.
     """
     owner = telegram.owner_id()
-    as_of = as_of or datetime.now(db.TZ).date()
+    # A caller-supplied as_of (tests, a one-shot `--as-of`) pins the date; production
+    # `--listen` passes None. The listener is a single long-lived process that can run
+    # for days, so "today" must be read live per update below, NOT frozen here at
+    # startup — otherwise "N days to payday" and safe-to-spend never advance past the
+    # day the listener booted (they keep counting from that stale boot day).
+    pinned_as_of = as_of
     tg_cfg = cfg.get("telegram") or {}
     timeout = int(tg_cfg.get("poll_timeout_seconds", 50)) if listen else 0
     backoff = float(tg_cfg.get("listen_backoff_seconds", 3))
@@ -306,6 +311,10 @@ def process_updates(
                 log.warning("skipping update with no update_id: %r", update)
                 continue
             next_offset = int(uid) + 1
+            # Read the date live per update (unless the caller pinned it): a listener
+            # that outlives midnight must answer today's commands as of today, not as
+            # of its boot day. Cheap call; a same-batch burst all sees one date.
+            as_of = pinned_as_of or datetime.now(db.TZ).date()
             try:
                 if _handle_update(conn, cfg, update, owner, as_of, dry_run):
                     handled += 1
